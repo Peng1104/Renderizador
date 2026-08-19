@@ -4,12 +4,12 @@ Renderizador base para o curso de Computação Gráfica
 Pré-requisitos:
 
 ```sh
-pip3 install -r requirements.txt
-````
+uv sync
+```
 
 Uso:
 ```sh
-  python3 renderizador.py
+  uv run renderizador/renderizador.py
 ````
 
 Opções
@@ -24,7 +24,7 @@ Opções
 Para rodar os exemplos:
 
 ```sh
-  python3 exemplos.py
+  uv run exemplos.py
 ````
 
 Opções:

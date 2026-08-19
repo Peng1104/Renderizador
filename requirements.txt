@@ -1,4 +1,0 @@
-numpy>=1.21.2
-matplotlib>=3.5.2
-pillow>=8.1.2
-QtPy>=2.2.0
