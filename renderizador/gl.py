@@ -6,116 +6,201 @@
 """
 Biblioteca Gráfica / Graphics Library.
 
-Desenvolvido por: <SEU NOME AQUI>
+Desenvolvido por: Lucas Hix
 Disciplina: Computação Gráfica
-Data: <DATA DE INÍCIO DA IMPLEMENTAÇÃO>
+Data: 19/08/2026
 """
 
 import time         # Para operações com tempo
 import gpu          # Simula os recursos de uma GPU
 import math         # Funções matemáticas
 import numpy as np  # Biblioteca do Numpy
+import numpy.typing as npt
+from typing import ClassVar, TypedDict
+
+
+class Colors(TypedDict):
+    """Conjunto de cores resolvidas a partir de um nó Appearance/Material."""
+
+    diffuseColor: list[float]
+    emissiveColor: list[float]
+    specularColor: list[float]
+    shininess: float
+    transparency: float
+    ambientIntensity: float
+
+class Pointo2D:
+    """Classe que representa um ponto 2D."""
+
+    x: int
+    y: int
 
 class GL:
     """Classe que representa a biblioteca gráfica (Graphics Library)."""
 
-    width = 800   # largura da tela
-    height = 600  # altura da tela
-    near = 0.01   # plano de corte próximo
-    far = 1000    # plano de corte distante
+    width: ClassVar[int]  # largura da tela
+    height: ClassVar[int] # altura da tela
+    near: ClassVar[float] # plano de corte próximo
+    far: ClassVar[float]  # plano de corte distante
 
     @staticmethod
-    def setup(width, height, near=0.01, far=1000):
+    def setup(width: int, height: int, near: float = 0.01, far: float = 1000) -> None:
         """Definr parametros para câmera de razão de aspecto, plano próximo e distante."""
         GL.width = width
         GL.height = height
         GL.near = near
         GL.far = far
 
+    # Matrizes de reflexão e rotação usadas para gerar
+    # os 8 octantes simétricos de um círculo a partir de um único octante calculado.
+    _CIRCLE_OCTANT_REFLECTIONS: ClassVar[npt.NDArray[np.float64]] = np.array([
+        [[1, 0], [0, 1]], [[0, 1], [1, 0]],
+        [[0, -1], [1, 0]], [[-1, 0], [0, 1]],
+        [[-1, 0], [0, -1]], [[0, -1], [-1, 0]],
+        [[0, 1], [-1, 0]], [[1, 0], [0, -1]],
+    ], dtype=np.float64)
+
     @staticmethod
-    def polypoint2D(point, colors):
+    def _round(valor: npt.ArrayLike) -> npt.NDArray[np.float64]:
+        """Arredonda 'metade para cima' (o round/np.round padrão usa round-half-to-even,
+        que gera saltos de pixel quando coordenadas caem exatamente em .5)."""
+        return np.floor(np.asarray(valor) + 0.5)
+
+    @staticmethod
+    def _to_rgb8(cor: list[float]) -> npt.NDArray[np.int64]:
+        """Converte uma cor X3D (0 a 1) para o intervalo 0-255 do matplotlib."""
+        return np.clip(
+            GL._round(np.asarray(cor, dtype=np.float64) * 255), 0, 255).astype(np.int64).tolist()
+
+    @staticmethod
+    def _draw_points(xs: npt.NDArray[np.int64], ys: npt.NDArray[np.int64],
+                     cor: list[int] | npt.NDArray[np.int64]) -> None:
+        """Desenha um conjunto de pixels, descartando os que caem fora da tela."""
+
+        dentro = (xs >= 0) & (xs < GL.width) & (ys >= 0) & (ys < GL.height)
+
+        for x, y in zip(xs[dentro].tolist(), ys[dentro].tolist()):
+            gpu.GPU.draw_pixel([x, y], gpu.PixelFormat.RGB8, cor)
+
+    @staticmethod
+    def _line_points(x0: float, y0: float, x1: float,
+                     y1: float) -> tuple[npt.NDArray[np.int64], npt.NDArray[np.int64]]:
+        """
+        Interpola os pontos de uma linha entre dois pontos. 
+        (bremsenham, mas usando numpy para vetorização)
+        """
+        steps = max(round(abs(x1 - x0)), round(abs(y1 - y0)), 1)
+        # Normaliza o numero de passos
+        t = np.linspace(0.0, 1.0, steps + 1)
+        xs = GL._round(x0 + t * (x1 - x0)).astype(np.int64)
+        ys = GL._round(y0 + t * (y1 - y0)).astype(np.int64)
+        return xs, ys
+
+    @staticmethod
+    def _fill_triangle(x0: float, y0: float, x1: float, y1: float,
+                       x2: float, y2: float, cor: npt.NDArray[np.int64]) -> None:
+        """
+        Preenche um triângulo 2D usando funções de aresta calculadas 
+        por multiplicação de matrizes.
+        """
+
+        min_x = max(0, math.floor(min(x0, x1, x2)))
+        max_x = min(GL.width - 1, math.ceil(max(x0, x1, x2)))
+        min_y = max(0, math.floor(min(y0, y1, y2)))
+        max_y = min(GL.height - 1, math.ceil(max(y0, y1, y2)))
+
+        if min_x > max_x or min_y > max_y:
+            return
+
+        # Cada aresta (a -> b) define uma reta cuja função de aresta é
+        # edge(p) = dy*px - dx*py + (ay*dx - ax*dy), com [dx, dy] = b - a.
+        verts = np.array([
+            [x0, y0],
+            [x1, y1],
+            [x2, y2]
+        ], dtype=np.float64)
+
+        a = verts
+        b = np.roll(verts, -1, axis=0) # Rotaciona
+        d = b - a
+
+        arestas = np.column_stack([
+            d[:,  1],                               # dy
+            -d[:, 0],                               # -dx
+            a[:,  1] * d[:, 0] - a[:, 0] * d[:, 1], # (ay*dx - ax*dy)
+        ])
+
+        retangulo_limitador  = np.meshgrid(
+            np.arange(min_x, max_x + 1),
+            np.arange(min_y, max_y + 1)
+        )
+        px, py = retangulo_limitador
+
+        pontos = np.stack([px.ravel(), py.ravel(), np.ones(px.size)])
+
+        baricentro = arestas @ pontos
+
+        # Verifica se o ponto esta dentro do triangulo
+        dentro = np.all(baricentro >= 0, axis=0) | np.all(baricentro <= 0, axis=0)
+
+        # Pinta
+        GL._draw_points(px.ravel()[dentro], py.ravel()[dentro], cor)
+
+    @staticmethod
+    def polypoint2D(point: list[float], colors: Colors) -> None:
         """Função usada para renderizar Polypoint2D."""
-        # https://www.web3d.org/specifications/X3Dv4/ISO-IEC19775-1v4-IS/Part01/components/geometry2D.html#Polypoint2D
-        # Nessa função você receberá pontos no parâmetro point, esses pontos são uma lista
-        # de pontos x, y sempre na ordem. Assim point[0] é o valor da coordenada x do
-        # primeiro ponto, point[1] o valor y do primeiro ponto. Já point[2] é a
-        # coordenada x do segundo ponto e assim por diante. Assuma a quantidade de pontos
-        # pelo tamanho da lista e assuma que sempre vira uma quantidade par de valores.
-        # O parâmetro colors é um dicionário com os tipos cores possíveis, para o Polypoint2D
-        # você pode assumir inicialmente o desenho dos pontos com a cor emissiva (emissiveColor).
-
-        # O print abaixo é só para vocês verificarem o funcionamento, DEVE SER REMOVIDO.
-        print("Polypoint2D : pontos = {0}".format(point)) # imprime no terminal pontos
-        print("Polypoint2D : colors = {0}".format(colors)) # imprime no terminal as cores
-
-        # Exemplo:
-        pos_x = GL.width//2
-        pos_y = GL.height//2
-        gpu.GPU.draw_pixel([pos_x, pos_y], gpu.GPU.RGB8, [255, 0, 0])  # altera pixel (u, v, tipo, r, g, b)
-        # cuidado com as cores, o X3D especifica de (0,1) e o Framebuffer de (0,255)
         
+        cor = GL._to_rgb8(colors["emissiveColor"])
+        pontos = np.round(np.asarray(point).reshape(-1, 2)).astype(np.int64)
+
+        GL._draw_points(pontos[:, 0], pontos[:, 1], cor)
+
     @staticmethod
-    def polyline2D(lineSegments, colors):
+    def polyline2D(lineSegments: list[float], colors: Colors) -> None:
         """Função usada para renderizar Polyline2D."""
-        # https://www.web3d.org/specifications/X3Dv4/ISO-IEC19775-1v4-IS/Part01/components/geometry2D.html#Polyline2D
-        # Nessa função você receberá os pontos de uma linha no parâmetro lineSegments, esses
-        # pontos são uma lista de pontos x, y sempre na ordem. Assim point[0] é o valor da
-        # coordenada x do primeiro ponto, point[1] o valor y do primeiro ponto. Já point[2] é
-        # a coordenada x do segundo ponto e assim por diante. Assuma a quantidade de pontos
-        # pelo tamanho da lista. A quantidade mínima de pontos são 2 (4 valores), porém a
-        # função pode receber mais pontos para desenhar vários segmentos. Assuma que sempre
-        # vira uma quantidade par de valores.
-        # O parâmetro colors é um dicionário com os tipos cores possíveis, para o Polyline2D
-        # você pode assumir inicialmente o desenho das linhas com a cor emissiva (emissiveColor).
 
-        print("Polyline2D : lineSegments = {0}".format(lineSegments)) # imprime no terminal
-        print("Polyline2D : colors = {0}".format(colors)) # imprime no terminal as cores
-        
-        # Exemplo:
-        pos_x = GL.width//2
-        pos_y = GL.height//2
-        gpu.GPU.draw_pixel([pos_x, pos_y], gpu.GPU.RGB8, [255, 0, 255])  # altera pixel (u, v, tipo, r, g, b)
-        # cuidado com as cores, o X3D especifica de (0,1) e o Framebuffer de (0,255)
+        cor = GL._to_rgb8(colors["emissiveColor"])
+        pontos = np.asarray(lineSegments, dtype=np.float64).reshape(-1, 2)
+
+        for (x0, y0), (x1, y1) in zip(pontos[:-1].tolist(), pontos[1:].tolist()):
+            xs, ys = GL._line_points(x0, y0, x1, y1)
+            GL._draw_points(xs, ys, cor)
 
     @staticmethod
-    def circle2D(radius, colors):
+    def circle2D(radius: float, colors: Colors) -> None:
         """Função usada para renderizar Circle2D."""
-        # https://www.web3d.org/specifications/X3Dv4/ISO-IEC19775-1v4-IS/Part01/components/geometry2D.html#Circle2D
-        # Nessa função você receberá um valor de raio e deverá desenhar o contorno de
-        # um círculo.
-        # O parâmetro colors é um dicionário com os tipos cores possíveis, para o Circle2D
-        # você pode assumir o desenho das linhas com a cor emissiva (emissiveColor).
 
-        print("Circle2D : radius = {0}".format(radius)) # imprime no terminal
-        print("Circle2D : colors = {0}".format(colors)) # imprime no terminal as cores
-        
-        # Exemplo:
-        pos_x = GL.width//2
-        pos_y = GL.height//2
-        gpu.GPU.draw_pixel([pos_x, pos_y], gpu.GPU.RGB8, [255, 0, 255])  # altera pixel (u, v, tipo, r, g, b)
-        # cuidado com as cores, o X3D especifica de (0,1) e o Framebuffer de (0,255)
+        cor = GL._to_rgb8(colors["emissiveColor"])
+        r = round(radius)
 
+        # Sem For: Calcula octante aplica as matrizes identidade e
+        # gera o circulo completo 
+
+        # Calcula um único octante (0 <= x <= y)
+        xs_octant = np.arange(0, int(r / math.sqrt(2)) + 1, dtype=np.float64)
+        ys_octant = GL._round(np.sqrt(r ** 2 - xs_octant ** 2))
+
+        octant = np.stack([xs_octant, ys_octant], axis=1)  # (N, 2)
+
+        # Aplica as 8 matrizes de reflexão para gerar todos os octantes do círculo
+        all_points = np.concatenate([octant @ m.T for m in GL._CIRCLE_OCTANT_REFLECTIONS])
+
+        GL._draw_points(all_points[:, 0].astype(np.int64), all_points[:, 1].astype(np.int64), cor)
 
     @staticmethod
-    def triangleSet2D(vertices, colors):
+    def triangleSet2D(vertices: list[float], colors: Colors) -> None:
         """Função usada para renderizar TriangleSet2D."""
-        # https://www.web3d.org/specifications/X3Dv4/ISO-IEC19775-1v4-IS/Part01/components/geometry2D.html#TriangleSet2D
-        # Nessa função você receberá os vertices de um triângulo no parâmetro vertices,
-        # esses pontos são uma lista de pontos x, y sempre na ordem. Assim point[0] é o
-        # valor da coordenada x do primeiro ponto, point[1] o valor y do primeiro ponto.
-        # Já point[2] é a coordenada x do segundo ponto e assim por diante. Assuma que a
-        # quantidade de pontos é sempre multiplo de 3, ou seja, 6 valores ou 12 valores, etc.
-        # O parâmetro colors é um dicionário com os tipos cores possíveis, para o TriangleSet2D
-        # você pode assumir inicialmente o desenho das linhas com a cor emissiva (emissiveColor).
-        print("TriangleSet2D : vertices = {0}".format(vertices)) # imprime no terminal
-        print("TriangleSet2D : colors = {0}".format(colors)) # imprime no terminal as cores
+        cor = GL._to_rgb8(colors["emissiveColor"])
 
-        # Exemplo:
-        gpu.GPU.draw_pixel([6, 8], gpu.GPU.RGB8, [255, 255, 0])  # altera pixel (u, v, tipo, r, g, b)
+        for i in range(0, len(vertices) - 5, 6):
+
+            GL._fill_triangle(vertices[i], vertices[i + 1],
+                              vertices[i + 2], vertices[i + 3],
+                              vertices[i + 4], vertices[i + 5], cor)
 
 
     @staticmethod
-    def triangleSet(point, colors):
+    def triangleSet(point: list[float], colors: Colors) -> None:
         """Função usada para renderizar TriangleSet."""
         # https://www.web3d.org/specifications/X3Dv4/ISO-IEC19775-1v4-IS/Part01/components/rendering.html#TriangleSet
         # Nessa função você receberá pontos no parâmetro point, esses pontos são uma lista
@@ -136,10 +221,10 @@ class GL:
         print("TriangleSet : colors = {0}".format(colors)) # imprime no terminal as cores
 
         # Exemplo de desenho de um pixel branco na coordenada 10, 10
-        gpu.GPU.draw_pixel([10, 10], gpu.GPU.RGB8, [255, 255, 255])  # altera pixel
+        gpu.GPU.draw_pixel([10, 10], gpu.PixelFormat.RGB8, [255, 255, 255])  # altera pixel
 
     @staticmethod
-    def viewpoint(position, orientation, fieldOfView):
+    def viewpoint(position: list[float], orientation: list[float], fieldOfView: float) -> None:
         """Função usada para renderizar (na verdade coletar os dados) de Viewpoint."""
         # Na função de viewpoint você receberá a posição, orientação e campo de visão da
         # câmera virtual. Use esses dados para poder calcular e criar a matriz de projeção
@@ -152,7 +237,7 @@ class GL:
         print("fieldOfView = {0} ".format(fieldOfView))
 
     @staticmethod
-    def transform_in(translation, scale, rotation):
+    def transform_in(translation: list[float], scale: list[float], rotation: list[float]) -> None:
         """Função usada para renderizar (na verdade coletar os dados) de Transform."""
         # A função transform_in será chamada quando se entrar em um nó X3D do tipo Transform
         # do grafo de cena. Os valores passados são a escala em um vetor [x, y, z]
@@ -176,7 +261,7 @@ class GL:
         print("")
 
     @staticmethod
-    def transform_out():
+    def transform_out() -> None:
         """Função usada para renderizar (na verdade coletar os dados) de Transform."""
         # A função transform_out será chamada quando se sair em um nó X3D do tipo Transform do
         # grafo de cena. Não são passados valores, porém quando se sai de um nó transform se
@@ -187,7 +272,7 @@ class GL:
         print("Saindo de Transform")
 
     @staticmethod
-    def triangleStripSet(point, stripCount, colors):
+    def triangleStripSet(point: list[float], stripCount: list[int], colors: Colors) -> None:
         """Função usada para renderizar TriangleStripSet."""
         # https://www.web3d.org/specifications/X3Dv4/ISO-IEC19775-1v4-IS/Part01/components/rendering.html#TriangleStripSet
         # A função triangleStripSet é usada para desenhar tiras de triângulos interconectados,
@@ -209,10 +294,10 @@ class GL:
         print("TriangleStripSet : colors = {0}".format(colors)) # imprime no terminal as cores
 
         # Exemplo de desenho de um pixel branco na coordenada 10, 10
-        gpu.GPU.draw_pixel([10, 10], gpu.GPU.RGB8, [255, 255, 255])  # altera pixel
+        gpu.GPU.draw_pixel([10, 10], gpu.PixelFormat.RGB8, [255, 255, 255])  # altera pixel
 
     @staticmethod
-    def indexedTriangleStripSet(point, index, colors):
+    def indexedTriangleStripSet(point: list[float], index: list[int], colors: Colors) -> None:
         """Função usada para renderizar IndexedTriangleStripSet."""
         # https://www.web3d.org/specifications/X3Dv4/ISO-IEC19775-1v4-IS/Part01/components/rendering.html#IndexedTriangleStripSet
         # A função indexedTriangleStripSet é usada para desenhar tiras de triângulos
@@ -232,11 +317,13 @@ class GL:
         print("IndexedTriangleStripSet : colors = {0}".format(colors)) # imprime as cores
 
         # Exemplo de desenho de um pixel branco na coordenada 10, 10
-        gpu.GPU.draw_pixel([10, 10], gpu.GPU.RGB8, [255, 255, 255])  # altera pixel
+        gpu.GPU.draw_pixel([10, 10], gpu.PixelFormat.RGB8, [255, 255, 255])  # altera pixel
 
     @staticmethod
-    def indexedFaceSet(coord, coordIndex, colorPerVertex, color, colorIndex,
-                       texCoord, texCoordIndex, colors, current_texture):
+    def indexedFaceSet(coord: list[float], coordIndex: list[int], colorPerVertex: bool,
+                       color: list[float], colorIndex: list[int],
+                       texCoord: list[float], texCoordIndex: list[int],
+                       colors: Colors, current_texture: list[str]) -> None:
         """Função usada para renderizar IndexedFaceSet."""
         # https://www.web3d.org/specifications/X3Dv4/ISO-IEC19775-1v4-IS/Part01/components/geometry3D.html#IndexedFaceSet
         # A função indexedFaceSet é usada para desenhar malhas de triângulos. Ela funciona de
@@ -275,10 +362,10 @@ class GL:
         print("IndexedFaceSet : colors = {0}".format(colors))  # imprime no terminal as cores
 
         # Exemplo de desenho de um pixel branco na coordenada 10, 10
-        gpu.GPU.draw_pixel([10, 10], gpu.GPU.RGB8, [255, 255, 255])  # altera pixel
+        gpu.GPU.draw_pixel([10, 10], gpu.PixelFormat.RGB8, [255, 255, 255])  # altera pixel
 
     @staticmethod
-    def box(size, colors):
+    def box(size: list[float], colors: Colors) -> None:
         """Função usada para renderizar Boxes."""
         # https://www.web3d.org/specifications/X3Dv4/ISO-IEC19775-1v4-IS/Part01/components/geometry3D.html#Box
         # A função box é usada para desenhar paralelepípedos na cena. O Box é centrada no
@@ -293,10 +380,10 @@ class GL:
         print("Box : colors = {0}".format(colors)) # imprime no terminal as cores
 
         # Exemplo de desenho de um pixel branco na coordenada 10, 10
-        gpu.GPU.draw_pixel([10, 10], gpu.GPU.RGB8, [255, 255, 255])  # altera pixel
+        gpu.GPU.draw_pixel([10, 10], gpu.PixelFormat.RGB8, [255, 255, 255])  # altera pixel
 
     @staticmethod
-    def sphere(radius, colors):
+    def sphere(radius: float, colors: Colors) -> None:
         """Função usada para renderizar Esferas."""
         # https://www.web3d.org/specifications/X3Dv4/ISO-IEC19775-1v4-IS/Part01/components/geometry3D.html#Sphere
         # A função sphere é usada para desenhar esferas na cena. O esfera é centrada no
@@ -310,7 +397,7 @@ class GL:
         print("Sphere : colors = {0}".format(colors)) # imprime no terminal as cores
 
     @staticmethod
-    def cone(bottomRadius, height, colors):
+    def cone(bottomRadius: float, height: float, colors: Colors) -> None:
         """Função usada para renderizar Cones."""
         # https://www.web3d.org/specifications/X3Dv4/ISO-IEC19775-1v4-IS/Part01/components/geometry3D.html#Cone
         # A função cone é usada para desenhar cones na cena. O cone é centrado no
@@ -326,7 +413,7 @@ class GL:
         print("Cone : colors = {0}".format(colors)) # imprime no terminal as cores
 
     @staticmethod
-    def cylinder(radius, height, colors):
+    def cylinder(radius: float, height: float, colors: Colors) -> None:
         """Função usada para renderizar Cilindros."""
         # https://www.web3d.org/specifications/X3Dv4/ISO-IEC19775-1v4-IS/Part01/components/geometry3D.html#Cylinder
         # A função cylinder é usada para desenhar cilindros na cena. O cilindro é centrado no
@@ -342,7 +429,7 @@ class GL:
         print("Cylinder : colors = {0}".format(colors)) # imprime no terminal as cores
 
     @staticmethod
-    def navigationInfo(headlight):
+    def navigationInfo(headlight: bool) -> None:
         """Características físicas do avatar do visualizador e do modelo de visualização."""
         # https://www.web3d.org/specifications/X3Dv4/ISO-IEC19775-1v4-IS/Part01/components/navigation.html#NavigationInfo
         # O campo do headlight especifica se um navegador deve acender um luz direcional que
@@ -355,7 +442,8 @@ class GL:
         print("NavigationInfo : headlight = {0}".format(headlight)) # imprime no terminal
 
     @staticmethod
-    def directionalLight(ambientIntensity, color, intensity, direction):
+    def directionalLight(ambientIntensity: float, color: list[float], intensity: float,
+                         direction: list[float]) -> None:
         """Luz direcional ou paralela."""
         # https://www.web3d.org/specifications/X3Dv4/ISO-IEC19775-1v4-IS/Part01/components/lighting.html#DirectionalLight
         # Define uma fonte de luz direcional que ilumina ao longo de raios paralelos
@@ -371,7 +459,8 @@ class GL:
         print("DirectionalLight : direction = {0}".format(direction)) # imprime no terminal
 
     @staticmethod
-    def pointLight(ambientIntensity, color, intensity, location):
+    def pointLight(ambientIntensity: float, color: list[float], intensity: float,
+                  location: list[float]) -> None:
         """Luz pontual."""
         # https://www.web3d.org/specifications/X3Dv4/ISO-IEC19775-1v4-IS/Part01/components/lighting.html#PointLight
         # Fonte de luz pontual em um local 3D no sistema de coordenadas local. Uma fonte
@@ -387,7 +476,7 @@ class GL:
         print("PointLight : location = {0}".format(location)) # imprime no terminal
 
     @staticmethod
-    def fog(visibilityRange, color):
+    def fog(visibilityRange: float, color: list[float]) -> None:
         """Névoa."""
         # https://www.web3d.org/specifications/X3Dv4/ISO-IEC19775-1v4-IS/Part01/components/environmentalEffects.html#Fog
         # O nó Fog fornece uma maneira de simular efeitos atmosféricos combinando objetos
@@ -403,7 +492,7 @@ class GL:
         print("Fog : visibilityRange = {0}".format(visibilityRange))
 
     @staticmethod
-    def timeSensor(cycleInterval, loop):
+    def timeSensor(cycleInterval: float, loop: bool) -> float:
         """Gera eventos conforme o tempo passa."""
         # https://www.web3d.org/specifications/X3Dv4/ISO-IEC19775-1v4-IS/Part01/components/time.html#TimeSensor
         # Os nós TimeSensor podem ser usados para muitas finalidades, incluindo:
@@ -427,7 +516,8 @@ class GL:
         return fraction_changed
 
     @staticmethod
-    def splinePositionInterpolator(set_fraction, key, keyValue, closed):
+    def splinePositionInterpolator(set_fraction: float, key: list[float], keyValue: list[float],
+                                   closed: bool) -> list[float]:
         """Interpola não linearmente entre uma lista de vetores 3D."""
         # https://www.web3d.org/specifications/X3Dv4/ISO-IEC19775-1v4-IS/Part01/components/interpolators.html#SplinePositionInterpolator
         # Interpola não linearmente entre uma lista de vetores 3D. O campo keyValue possui
@@ -450,7 +540,8 @@ class GL:
         return value_changed
 
     @staticmethod
-    def orientationInterpolator(set_fraction, key, keyValue):
+    def orientationInterpolator(set_fraction: float, key: list[float],
+                                keyValue: list[float]) -> list[float]:
         """Interpola entre uma lista de valores de rotação especificos."""
         # https://www.web3d.org/specifications/X3Dv4/ISO-IEC19775-1v4-IS/Part01/components/interpolators.html#OrientationInterpolator
         # Interpola rotações são absolutas no espaço do objeto e, portanto, não são cumulativas.
@@ -470,13 +561,13 @@ class GL:
         print("OrientationInterpolator : keyValue = {0}".format(keyValue))
 
         # Abaixo está só um exemplo de como os dados podem ser calculados e transferidos
-        value_changed = [0, 0, 1, 0]
+        value_changed = [0.0, 0.0, 1.0, 0.0]
 
         return value_changed
 
     # Para o futuro (Não para versão atual do projeto.)
-    def vertex_shader(self, shader):
+    def vertex_shader(self, shader: str) -> None:
         """Para no futuro implementar um vertex shader."""
 
-    def fragment_shader(self, shader):
+    def fragment_shader(self, shader: str) -> None:
         """Para no futuro implementar um fragment shader."""

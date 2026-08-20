@@ -1,7 +1,7 @@
 [project]
 name = "renderizador"
 version = "1.1.1"
-description = "Renderizador base para o curso de Computação Gráfica"
+description = "Renderizador para o curso de Computação Gráfica"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
@@ -9,4 +9,13 @@ dependencies = [
     "matplotlib>=3.11.1",
     "pillow>=12.3.0",
     "qtpy>=2.4.3",
+    "pyqt6>=6.11.0",
 ]
+
+[dependency-groups]
+dev = [
+    "matplotlib-stubs>=0.3.11",
+]
+
+[tool.pyright]
+typeCheckingMode = "strict"

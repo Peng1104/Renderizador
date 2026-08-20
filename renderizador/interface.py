@@ -10,35 +10,48 @@ Data: 31 de Agosto de 2020
 """
 
 import time         # Para operações com tempo, como a duração de renderização
+from typing import Callable, ClassVar
+
 import numpy as np  # Para operações matemáticas
+import numpy.typing as npt
 
 # Matplotlib
 import matplotlib.pyplot as plt
+from matplotlib.artist import Artist
+from matplotlib.backend_bases import Event
 from matplotlib.ticker import MultipleLocator
 from matplotlib.widgets import Button, TextBox, CheckButtons
 import matplotlib.animation as animation
 import matplotlib.patheffects as path_effects
 
+import x3d
+from x3d import Circulo, Linha, Poligono, Ponto
+
+# matplotlib 3.11.1 wraps TextBox._resize with a decorator meant for mouse
+# events, which reads event.inaxes; ResizeEvent has no such attribute, so
+# every window resize raises AttributeError. Restore the undecorated version.
+TextBox._resize = lambda self, event: self.stop_typing()  # pyright: ignore[reportAttributeAccessIssue]
+
 
 class Interface:
     """Interface para usuário/desenvolvedor verificar resultados da renderização."""
 
-    pontos = []        # pontos a serem desenhados
-    linhas = []        # linhas a serem desenhadas
-    circulos = []      # circulos a serem desenhados
-    poligonos = []     # poligonos a serem desenhados
+    pontos: ClassVar[list[Ponto]] = []        # pontos a serem desenhados
+    linhas: ClassVar[list[Linha]] = []        # linhas a serem desenhadas
+    circulos: ClassVar[list[Circulo]] = []      # circulos a serem desenhados
+    poligonos: ClassVar[list[Poligono]] = []     # poligonos a serem desenhados
 
-    last_time = 0      # para calculo de FPS
+    last_time: ClassVar[float] = 0      # para calculo de FPS
 
-    def __init__(self, width, height, filename):
+    def __init__(self, width: int, height: int, filename: str) -> None:
         """Inicializa Interface Gráfica."""
         self.width = width
         self.height = height
 
-        self.geometrias = []    # lista de geometrias para controlar exibição
+        self.geometrias: list[Artist] = []    # lista de geometrias para controlar exibição
         self.grid = False       # usado para controlar se grid exibido ou não
 
-        self.image_saver = None # recebe função para salvar imagens
+        self.image_saver: Callable[[], None] | None = None # recebe função para salvar imagens
 
         dpi = 100
         if self.width > 640:
@@ -57,7 +70,7 @@ class Interface:
         self.fig.subplots_adjust(left=0.08, right=0.76, bottom=0.15, top=0.98)
         self.fig.tight_layout(rect=(0, 0.05, 1, 0.98))
 
-        self.axes.axis([0, width, height, 0])  # [xmin, xmax, ymin, ymax]
+        self.axes.axis((0, width, height, 0))  # (xmin, xmax, ymin, ymax)  # pyright: ignore[reportUnknownMemberType]
 
         self.axes.xaxis.tick_top()
 
@@ -76,68 +89,71 @@ class Interface:
         self.axes.xaxis.set_minor_locator(MultipleLocator(divisions//10))
         self.axes.yaxis.set_minor_locator(MultipleLocator(divisions//10))
 
-    def annotation(self, points):
+    def annotation(self, points: list[list[float]]) -> None:
         """Desenha texto ao lado dos pontos identificando eles."""
         dist_label = 5 # distância do label para o ponto
         for i, pos in enumerate(points):
-            text = self.axes.annotate("P{0}".format(i), xy=pos, xytext=(dist_label, dist_label),
+            text = self.axes.annotate("P{0}".format(i), xy=(pos[0], pos[1]),  # pyright: ignore[reportUnknownMemberType]
+                                      xytext=(dist_label, dist_label),
                                       textcoords='offset points', color='lightgray')
             self.geometrias.append(text)
 
-    def draw_points(self, point, text=False):
+    def draw_points(self, point: Ponto, text: bool = False) -> None:
         """Exibe pontos na tela da interface gráfica."""
         points = point["points"]
-        color = point["appearance"].material.emissiveColor
+        color = x3d.get_colors(point["appearance"])["emissiveColor"]
 
         # converte pontos
         x_values = [pt[0] for pt in points]
         y_values = [pt[1] for pt in points]
 
         # desenha as linhas com os pontos
-        dots, = self.axes.plot(x_values, y_values, marker='o', color=color, linestyle="")  # "ro"
+        dots, = self.axes.plot(x_values, y_values, marker='o', color=color, linestyle="")  # "ro"  # pyright: ignore[reportUnknownMemberType]
         self.geometrias.append(dots)
 
         # desenha texto se requisitado
         if text:
             self.annotation(points)
 
-    def draw_lines(self, lines, text=False):
+    def draw_lines(self, lines: Linha, text: bool = False) -> None:
         """Exibe linhas na tela da interface gráfica."""
         points = lines["lines"]
-        color = lines["appearance"].material.emissiveColor
+        color = x3d.get_colors(lines["appearance"])["emissiveColor"]
 
         # converte pontos
         x_values = [pt[0] for pt in points]
         y_values = [pt[1] for pt in points]
 
         # desenha as linhas com os pontos
-        line, = self.axes.plot(x_values, y_values, marker='o', color=color, linestyle="-")
+        line, = self.axes.plot(x_values, y_values, marker='o', color=color, linestyle="-")  # pyright: ignore[reportUnknownMemberType]
         self.geometrias.append(line)
 
         # desenha texto se requisitado
         if text:
             self.annotation(points)
 
-    def draw_circles(self, circles, text=False):
+    def draw_circles(self, circles: Circulo, text: bool = False) -> None:
         """Exibe contornos de círculos na tela da interface gráfica."""
         radius = circles["radius"]
-        color = circles["appearance"].material.emissiveColor
+        color = x3d.get_colors(circles["appearance"])["emissiveColor"]
 
         # desenha o contorno de um círculo
         x_values = [radius * np.sin(np.radians(i)) for i in range(0, 360, 2)]
         y_values = [radius * np.cos(np.radians(i)) for i in range(0, 360, 2)]
-        circle, = self.axes.plot(x_values, y_values, marker='', color=color, linestyle="-")
-        circle.set_path_effects([path_effects.withStroke(linewidth=3, foreground='black')])
+        circle, = self.axes.plot(x_values, y_values, marker='', color=color, linestyle="-")  # pyright: ignore[reportUnknownMemberType]
+        # matplotlib-stubs declara path_effects como um único AbstractPathEffect, mas a
+        # implementação real (artist.py) espera uma lista — bug do pacote de stubs.
+        circle.set_path_effects([path_effects.withStroke(linewidth=3, foreground='black')])  # type: ignore[arg-type]
         self.geometrias.append(circle)
 
         # desenha texto se requisitado
         if text:
             self.annotation([[0,0]]) # Centro sempre no (0,0)
 
-    def draw_triangle(self, triangles, text=False):
+    def draw_triangle(self, triangles: Poligono, text: bool = False) -> None:
         """Exibe triângulos na tela da interface gráfica."""
         points = triangles["vertices"]
-        color = triangles["appearance"].material.emissiveColor
+        color = x3d.get_colors(triangles["appearance"])["emissiveColor"]
 
         if points:
             # converte pontos
@@ -145,40 +161,40 @@ class Interface:
             y_values = [pt[1] for pt in points] + [points[0][1]]
 
             # desenha as linhas com os pontos  op:"ro-"
-            line, = self.axes.plot(x_values, y_values, marker='o', color=color, linestyle="-")
+            line, = self.axes.plot(x_values, y_values, marker='o', color=color, linestyle="-")  # pyright: ignore[reportUnknownMemberType]
             self.geometrias.append(line)
 
-            poly, = self.axes.fill(x_values, y_values, color=color+[0.4])
+            poly, = self.axes.fill(x_values, y_values, color=color+[0.4])  # pyright: ignore[reportUnknownMemberType]
             self.geometrias.append(poly)
 
             # desenha texto se requisitado
             if text:
                 self.annotation(points)
 
-    def exibe_geometrias_grid(self, label):
+    def exibe_geometrias_grid(self, label: str | None) -> None:
         """Exibe e esconde as geometrias/grid sobre a tela da interface gráfica."""
         if label == 'Geometria':
             for geometria in self.geometrias:
                 geometria.set_visible(not geometria.get_visible())
-            self.fig.canvas.draw()
+            self.fig.canvas.draw()  # pyright: ignore[reportUnknownMemberType]
             self.fig.canvas.flush_events()
         elif label == 'Grid':
             self.grid = not self.grid
-            self.axes.grid(self.grid, which='both')
-            self.fig.canvas.draw()
+            self.axes.grid(self.grid, which='both')  # pyright: ignore[reportUnknownMemberType]
+            self.fig.canvas.draw()  # pyright: ignore[reportUnknownMemberType]
             self.fig.canvas.flush_events()
 
-    def set_saver(self, image_saver):
+    def set_saver(self, image_saver: Callable[[], None]) -> None:
         """Define função para salvar imagens."""
         self.image_saver = image_saver
 
-    def save_image(self, _event):
+    def save_image(self, _event: Event) -> None:
         """Salva imagens."""
         if self.image_saver:
             print("Salvando imagem")
             self.image_saver()
 
-    def preview(self, pause, func):
+    def preview(self, pause: bool, func: Callable[[], npt.NDArray[np.uint8]]) -> None:
         """Realização a visualização na tela da interface gráfica."""
         extent = (0, self.width, self.height, 0)
 
@@ -190,7 +206,7 @@ class Interface:
         # Calcula o tempo ao concluir a renderização
         elapsed_time = time.process_time() - start
 
-        image = self.axes.imshow(data, interpolation='nearest', extent=extent)
+        image = self.axes.imshow(data, interpolation='nearest', extent=extent)  # pyright: ignore[reportUnknownMemberType]
 
         for pontos in Interface.pontos:
             self.draw_points(pontos, text=True)
@@ -212,19 +228,17 @@ class Interface:
             altura = self.height
         else:
             altura = 480
-        m = -1/6500
-        b = 129/650
         alt_but = -0.0001 * altura + 0.15
 
         # Configura todos os botões da interface
-        bgeogrid = CheckButtons(plt.axes([0.68, 0.02, 0.18, alt_but]), ['Grid', 'Geometria'])
-        bgeogrid.on_clicked(self.exibe_geometrias_grid)
+        bgeogrid = CheckButtons(plt.axes((0.68, 0.02, 0.18, alt_but)), ['Grid', 'Geometria'])  # pyright: ignore[reportUnknownMemberType]
+        bgeogrid.on_clicked(self.exibe_geometrias_grid)  # pyright: ignore[reportUnknownMemberType]
 
-        bsave = Button(plt.axes([0.4, 0.02, 0.15, 0.06]), 'Salvar')
-        bsave.on_clicked(self.save_image)
+        bsave = Button(plt.axes((0.4, 0.02, 0.15, 0.06)), 'Salvar')  # pyright: ignore[reportUnknownMemberType]
+        bsave.on_clicked(self.save_image)  # pyright: ignore[reportUnknownMemberType]
 
         # Animação de quadros
-        def animate(_frame_number):
+        def animate(_frame_number: int) -> None:
 
             # Executa a função recebida como parâmetro no método principal
             data = func()
@@ -235,16 +249,16 @@ class Interface:
             # Calcula e atualiza a quantidade de Quadros Por Segundo
             fps = "{:.1f}".format(1/(time.process_time() - Interface.last_time))
             time_box.set_val(fps)
-            time_box.cursor_index = len(fps)
+            # cursor_index é atributo real de TextBox em runtime, mas matplotlib-stubs
+            # não o declara — lacuna do pacote de stubs.
+            time_box.cursor_index = len(fps)  # type: ignore[attr-defined]
             Interface.last_time = time.process_time()
-
-            return image, time_box
 
         # Para cálculo de FPS
         Interface.last_time = time.process_time()
 
         # Configura texto da interface
-        time_box_pos = plt.axes([0.18, 0.02, 0.15, 0.06])
+        time_box_pos = plt.axes((0.18, 0.02, 0.15, 0.06))  # pyright: ignore[reportUnknownMemberType]
         if pause:
             time_box = TextBox(time_box_pos, 'Tempo (s) ', initial="{:.4f}".format(elapsed_time))
         else:

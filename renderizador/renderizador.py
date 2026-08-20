@@ -12,6 +12,9 @@ Data: 28 de Agosto de 2020
 import os           # Para rotinas do sistema operacional
 import argparse     # Para tratar os parâmetros da linha de comando
 
+import numpy as np
+import numpy.typing as npt
+
 import gl           # Recupera rotinas de suporte ao X3D
 
 import interface    # Janela de visualização baseada no Matplotlib
@@ -27,16 +30,16 @@ ALTURA = 40   # Valor padrão para altura da tela
 class Renderizador:
     """Realiza a renderização da cena informada."""
 
-    def __init__(self):
+    def __init__(self) -> None:
         """Definindo valores padrão."""
-        self.width = LARGURA
-        self.height = ALTURA
-        self.x3d_file = ""
-        self.image_file = "tela.png"
-        self.scene = None
-        self.framebuffers = {}
+        self.width: int = LARGURA
+        self.height: int = ALTURA
+        self.x3d_file: str = ""
+        self.image_file: str = "tela.png"
+        self.scene: x3d.X3D | None = None
+        self.framebuffers: dict[str, int] = {}
 
-    def setup(self):
+    def setup(self) -> None:
         """Configura o sistema para a renderização."""
         # Configurando color buffers para exibição na tela
 
@@ -47,7 +50,7 @@ class Renderizador:
         self.framebuffers["FRONT"] = fbo[0]
 
         # Define que a posição criada será usada para desenho e leitura
-        gpu.GPU.bind_framebuffer(gpu.GPU.FRAMEBUFFER, self.framebuffers["FRONT"])
+        gpu.GPU.bind_framebuffer(gpu.FramebufferTarget.FRAMEBUFFER, self.framebuffers["FRONT"])
         # Opções:
         # - DRAW_FRAMEBUFFER: Faz o bind só para escrever no framebuffer
         # - READ_FRAMEBUFFER: Faz o bind só para leitura no framebuffer
@@ -58,8 +61,8 @@ class Renderizador:
         # Memória de Framebuffer para canal de cores
         gpu.GPU.framebuffer_storage(
             self.framebuffers["FRONT"],
-            gpu.GPU.COLOR_ATTACHMENT,
-            gpu.GPU.RGB8,
+            gpu.Attachment.COLOR_ATTACHMENT,
+            gpu.PixelFormat.RGB8,
             self.width,
             self.height
         )
@@ -67,8 +70,8 @@ class Renderizador:
         # Descomente as seguintes linhas se for usar um Framebuffer para profundidade
         # gpu.GPU.framebuffer_storage(
         #     self.framebuffers["FRONT"],
-        #     gpu.GPU.DEPTH_ATTACHMENT,
-        #     gpu.GPU.DEPTH_COMPONENT32F,
+        #     gpu.Attachment.DEPTH_ATTACHMENT,
+        #     gpu.PixelFormat.DEPTH_COMPONENT32F,
         #     self.width,
         #     self.height
         # )
@@ -92,9 +95,10 @@ class Renderizador:
         gpu.GPU.clear_depth(1.0)
 
         # Definindo tamanho do Viewport para renderização
+        assert self.scene is not None
         self.scene.viewport(width=self.width, height=self.height)
 
-    def pre(self):
+    def pre(self) -> None:
         """Rotinas pré renderização."""
         # Função invocada antes do processo de renderização iniciar.
 
@@ -105,7 +109,7 @@ class Renderizador:
         # Define o valor do pixel no framebuffer: draw_pixel(coord, mode, data)
         # Retorna o valor do pixel no framebuffer: read_pixel(coord, mode)
 
-    def pos(self):
+    def pos(self) -> None:
         """Rotinas pós renderização."""
         # Função invocada após o processo de renderização terminar.
 
@@ -117,7 +121,7 @@ class Renderizador:
         # Esse método será utilizado na fase de implementação de animações
         gpu.GPU.swap_buffers()
 
-    def mapping(self):
+    def mapping(self) -> None:
         """Mapeamento de funções para as rotinas de renderização."""
         # Rotinas encapsuladas na classe GL (Graphics Library)
         x3d.X3D.renderer["Polypoint2D"] = gl.GL.polypoint2D
@@ -143,14 +147,15 @@ class Renderizador:
         x3d.X3D.renderer["SplinePositionInterpolator"] = gl.GL.splinePositionInterpolator
         x3d.X3D.renderer["OrientationInterpolator"] = gl.GL.orientationInterpolator
 
-    def render(self):
+    def render(self) -> npt.NDArray[np.uint8]:
         """Laço principal de renderização."""
         self.pre()  # executa rotina pré renderização
+        assert self.scene is not None
         self.scene.render()  # faz o traversal no grafo de cena
         self.pos()  # executa rotina pós renderização
         return gpu.GPU.get_frame_buffer()
 
-    def main(self):
+    def main(self) -> None:
         """Executa a renderização."""
         # Tratando entrada de parâmetro
         parser = argparse.ArgumentParser(add_help=False)   # parser para linha de comando
@@ -191,6 +196,7 @@ class Renderizador:
         self.mapping()
 
         # Se no modo silencioso não configurar janela de visualização
+        window: interface.Interface | None = None
         if not args.quiet:
             window = interface.Interface(self.width, self.height, self.x3d_file)
             self.scene.set_preview(window)
@@ -206,8 +212,10 @@ class Renderizador:
 
         # Se no modo silencioso salvar imagem e não mostrar janela de visualização
         if args.quiet:
+            self.render()  # executa a renderização da cena
             gpu.GPU.save_image()  # Salva imagem em arquivo
         else:
+            assert window is not None
             window.set_saver(gpu.GPU.save_image)  # pasa a função para salvar imagens
             window.preview(args.pause, self.render)  # mostra visualização
 
