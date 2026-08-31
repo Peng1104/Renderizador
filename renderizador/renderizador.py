@@ -9,45 +9,56 @@ Disciplina: Computação Gráfica
 Data: 28 de Agosto de 2020
 """
 
-import os           # Para rotinas do sistema operacional
-import argparse     # Para tratar os parâmetros da linha de comando
+import argparse  # Para tratar os parâmetros da linha de comando
+import os  # Para rotinas do sistema operacional
 
+import gl  # Recupera rotinas de suporte ao X3D
+import gpu  # Simula os recursos de uma GPU
+import interface  # Janela de visualização baseada no Matplotlib
 import numpy as np
 import numpy.typing as npt
-
-import gl           # Recupera rotinas de suporte ao X3D
-
-import interface    # Janela de visualização baseada no Matplotlib
-import gpu          # Simula os recursos de uma GPU
-
-import x3d          # Faz a leitura do arquivo X3D, gera o grafo de cena e faz traversal
-import scenegraph   # Imprime o grafo de cena no console
+import scenegraph  # Imprime o grafo de cena no console
+import x3d  # Faz a leitura do arquivo X3D, gera o grafo de cena e faz traversal
 
 LARGURA = 60  # Valor padrão para largura da tela
 ALTURA = 40   # Valor padrão para altura da tela
 
 
 class Renderizador:
-    """Realiza a renderização da cena informada."""
+    """
+    Realiza a renderização da cena informada.
+    """
 
     def __init__(self) -> None:
-        """Definindo valores padrão."""
+        """
+        Definindo valores padrão.
+        """
         self.width: int = LARGURA
         self.height: int = ALTURA
         self.x3d_file: str = ""
         self.image_file: str = "tela.png"
         self.scene: x3d.X3D | None = None
         self.framebuffers: dict[str, int] = {}
+        # Fator de supersampling (SSAA): desenha internamente em resolução
+        # width*fator x height*fator e reduz por média de blocos em pos(),
+        # suavizando as bordas "em escada" dos triângulos.
+        self.supersampling: int = 2
+        self.render_width: int = self.width
+        self.render_height: int = self.height
 
     def setup(self) -> None:
-        """Configura o sistema para a renderização."""
+        """
+        Configura o sistema para a renderização.
+        """
         # Configurando color buffers para exibição na tela
 
-        # Cria uma (1) posição de FrameBuffer na GPU
-        fbo = gpu.GPU.gen_framebuffers(1)
+        # Cria duas posições de FrameBuffer na GPU: FRONT recebe o desenho em
+        # resolução supersampled, SCREEN recebe o resultado final reduzido.
+        fbo = gpu.GPU.gen_framebuffers(2)
 
-        # Define o atributo FRONT como o FrameBuffe principal
+        # Define o atributo FRONT como o FrameBuffer de desenho
         self.framebuffers["FRONT"] = fbo[0]
+        self.framebuffers["SCREEN"] = fbo[1]
 
         # Define que a posição criada será usada para desenho e leitura
         gpu.GPU.bind_framebuffer(gpu.FramebufferTarget.FRAMEBUFFER, self.framebuffers["FRONT"])
@@ -58,9 +69,17 @@ class Renderizador:
 
         # Aloca memória no FrameBuffer para um tipo e tamanho especificado de buffer
 
-        # Memória de Framebuffer para canal de cores
+        # Memória de Framebuffer para canal de cores: FRONT em resolução
+        # supersampled (onde o GL desenha) e SCREEN na resolução final.
         gpu.GPU.framebuffer_storage(
             self.framebuffers["FRONT"],
+            gpu.Attachment.COLOR_ATTACHMENT,
+            gpu.PixelFormat.RGB8,
+            self.render_width,
+            self.render_height
+        )
+        gpu.GPU.framebuffer_storage(
+            self.framebuffers["SCREEN"],
             gpu.Attachment.COLOR_ATTACHMENT,
             gpu.PixelFormat.RGB8,
             self.width,
@@ -94,12 +113,14 @@ class Renderizador:
         # Assuma 1.0 o mais afastado e -1.0 o mais próximo da camera
         gpu.GPU.clear_depth(1.0)
 
-        # Definindo tamanho do Viewport para renderização
+        # Definindo tamanho do Viewport para renderização (resolução supersampled)
         assert self.scene is not None
-        self.scene.viewport(width=self.width, height=self.height)
+        self.scene.viewport(width=self.render_width, height=self.render_height)
 
     def pre(self) -> None:
-        """Rotinas pré renderização."""
+        """
+        Rotinas pré renderização.
+        """
         # Função invocada antes do processo de renderização iniciar.
 
         # Limpa o frame buffers atual
@@ -110,19 +131,35 @@ class Renderizador:
         # Retorna o valor do pixel no framebuffer: read_pixel(coord, mode)
 
     def pos(self) -> None:
-        """Rotinas pós renderização."""
+        """
+        Rotinas pós renderização.
+        """
         # Função invocada após o processo de renderização terminar.
 
         # Essa é uma chamada conveniente para manipulação de buffers
         # ao final da renderização de um frame. Como por exemplo, executar
         # downscaling da imagem.
 
+        # Reduz o FrameBuffer supersampled (FRONT) para a resolução final
+        # (SCREEN) fazendo a média de cada bloco fator x fator (box filter),
+        # suavizando as bordas em escada do rasterizador sem antialiasing.
+        s = self.supersampling
+        desenhado = gpu.GPU.frame_buffer[self.framebuffers["FRONT"]].color
+        blocos = desenhado.reshape(self.height, s, self.width, s, -1)
+        reduzido = blocos.mean(axis=(1, 3))
+        tela = gpu.GPU.frame_buffer[self.framebuffers["SCREEN"]]
+        tela.color = np.round(reduzido).astype(np.uint8)
+        gpu.GPU.bind_framebuffer(
+            gpu.FramebufferTarget.READ_FRAMEBUFFER, self.framebuffers["SCREEN"])
+
         # Método para a troca dos buffers (NÃO IMPLEMENTADO)
         # Esse método será utilizado na fase de implementação de animações
         gpu.GPU.swap_buffers()
 
     def mapping(self) -> None:
-        """Mapeamento de funções para as rotinas de renderização."""
+        """
+        Mapeamento de funções para as rotinas de renderização.
+        """
         # Rotinas encapsuladas na classe GL (Graphics Library)
         x3d.X3D.renderer["Polypoint2D"] = gl.GL.polypoint2D
         x3d.X3D.renderer["Polyline2D"] = gl.GL.polyline2D
@@ -148,7 +185,9 @@ class Renderizador:
         x3d.X3D.renderer["OrientationInterpolator"] = gl.GL.orientationInterpolator
 
     def render(self) -> npt.NDArray[np.uint8]:
-        """Laço principal de renderização."""
+        """
+        Laço principal de renderização.
+        """
         self.pre()  # executa rotina pré renderização
         assert self.scene is not None
         self.scene.render()  # faz o traversal no grafo de cena
@@ -156,7 +195,9 @@ class Renderizador:
         return gpu.GPU.get_frame_buffer()
 
     def main(self) -> None:
-        """Executa a renderização."""
+        """
+        Executa a renderização.
+        """
         # Tratando entrada de parâmetro
         parser = argparse.ArgumentParser(add_help=False)   # parser para linha de comando
         parser.add_argument("-i", "--input", help="arquivo X3D de entrada")
@@ -166,6 +207,8 @@ class Renderizador:
         parser.add_argument("-g", "--graph", help="imprime o grafo de cena", action='store_true')
         parser.add_argument("-p", "--pause", help="começa simulação em pausa", action='store_true')
         parser.add_argument("-q", "--quiet", help="não exibe janela", action='store_true')
+        parser.add_argument("-s", "--supersampling",
+                            help="fator de supersampling (antialiasing)", type=int)
         args = parser.parse_args() # parse the arguments
         if args.input:
             self.x3d_file = args.input
@@ -175,6 +218,10 @@ class Renderizador:
             self.width = args.width
         if args.height:
             self.height = args.height
+        if args.supersampling:
+            self.supersampling = args.supersampling
+        self.render_width = self.width * self.supersampling
+        self.render_height = self.height * self.supersampling
 
         path = os.path.dirname(os.path.abspath(self.x3d_file))
 
@@ -184,10 +231,10 @@ class Renderizador:
         # Abre arquivo X3D
         self.scene = x3d.X3D(self.x3d_file)
 
-        # Iniciando Biblioteca Gráfica
+        # Iniciando Biblioteca Gráfica (resolução supersampled)
         gl.GL.setup(
-            self.width,
-            self.height,
+            self.render_width,
+            self.render_height,
             near=0.01,
             far=1000
         )

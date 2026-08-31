@@ -9,12 +9,12 @@ Disciplina: Computação Gráfica
 Data: 17 de Agosto de 2021
 """
 
-import subprocess
-import time
 import json
 import os
 import signal
+import subprocess
 import sys
+import time
 
 DIR = "docs/exemplos/"
 
@@ -22,6 +22,9 @@ DIR = "docs/exemplos/"
 subprocesses = []
 
 def signal_handler(sig, frame):
+    """
+    Encerra os subprocessos abertos ao receber SIGINT.
+    """
     print("Terminating subprocesses...")
     for proc in subprocesses:
         proc.terminate()
@@ -44,7 +47,8 @@ for section in data['examples']:
         w = str(example.get('width', 640))
         h = str(example.get('height', 480))
         p = example.get('pause', False)
-        TESTE.append([x3d, "-i", os.path.join(DIR, path, f"{x3d}/{x3d}.x3d"), "-w", w, "-h", h]  + (["-p"] if p else []))
+        args = [x3d, "-i", os.path.join(DIR, path, f"{x3d}/{x3d}.x3d"), "-w", w, "-h", h]
+        TESTE.append(args + (["-p"] if p else []))
 
 
 # Lista os exemplos registrados (em 3 colunas)
@@ -72,7 +76,7 @@ for escolha in escolhas:
             faixa = escolha.split("..")
             for i in range(int(faixa[0]), int(faixa[1])+1):
                 opcoes.append(TESTE[i])
-        except:
+        except (ValueError, IndexError):
             sys.exit("Opção inválida!")
     elif escolha.isnumeric():
         numero = int(escolha)

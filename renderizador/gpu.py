@@ -9,7 +9,7 @@ Disciplina: Computação Gráfica
 Data: 31 de Agosto de 2020
 """
 
-import os           # Para rotinas do sistema operacional
+import os  # Para rotinas do sistema operacional
 from enum import IntEnum, IntFlag, auto
 from typing import ClassVar, Sequence
 
@@ -26,7 +26,9 @@ Coord = Sequence[int]
 PixelData = Sequence[float] | npt.NDArray[np.floating] | npt.NDArray[np.integer]
 
 class FramebufferTarget(IntFlag):
-    """Define para qual operação (leitura, escrita ou ambas) um FrameBuffer é vinculado."""
+    """
+    Define para qual operação (leitura, escrita ou ambas) um FrameBuffer é vinculado.
+    """
 
     DRAW_FRAMEBUFFER = auto()  # Faz o bind só para escrever no framebuffer
     READ_FRAMEBUFFER = auto()  # Faz o bind só para leitura no framebuffer
@@ -34,7 +36,9 @@ class FramebufferTarget(IntFlag):
 
 
 class PixelFormat(IntEnum):
-    """Formato dos dados armazenados em um canal (cor ou profundidade) do FrameBuffer."""
+    """
+    Formato dos dados armazenados em um canal (cor ou profundidade) do FrameBuffer.
+    """
 
     RGB8 = 0b001  # Vermelho, Verde, Azul de 8bits cada (0-255)
     RGBA8 = 0b010  # Vermelho, Verde, Azul e Transparência de 8bits cada (0-255)
@@ -43,23 +47,31 @@ class PixelFormat(IntEnum):
 
 
 class Attachment(IntEnum):
-    """Identifica qual memória de um FrameBuffer Object está sendo referenciada."""
+    """
+    Identifica qual memória de um FrameBuffer Object está sendo referenciada.
+    """
 
     COLOR_ATTACHMENT = 0  # Alocações para as cores da imagem renderizada
     DEPTH_ATTACHMENT = 1  # Alocações para as profundidades da imagem renderizada
 
 
 class FrameBuffer:
-    """Organiza objetos FrameBuffer (FrameBuffer Objects)."""
+    """
+    Organiza objetos FrameBuffer (FrameBuffer Objects).
+    """
 
     def __init__(self) -> None:
-        """Iniciando propriedades do FramBuffer."""
+        """
+        Iniciando propriedades do FramBuffer.
+        """
         self.color: npt.NDArray[np.uint8] = np.empty(0, dtype=np.uint8)
         self.depth: npt.NDArray[np.number] = np.empty(0)
 
 
 class GPU:
-    """Classe que representa o funcionamento de uma GPU."""
+    """
+    Classe que representa o funcionamento de uma GPU.
+    """
 
     # Atributos estáticos
     image_file: ClassVar[str] = ""
@@ -71,7 +83,9 @@ class GPU:
     clear_depth_val: ClassVar[float] = 1.0
 
     def __init__(self, image_file: str, path: str) -> None:
-        """Define o nome do arquivo para caso se salvar o framebuffer."""
+        """
+        Define o nome do arquivo para caso se salvar o framebuffer.
+        """
         GPU.image_file = image_file
 
         # Inicia lista para objetos Frame Buffer
@@ -90,7 +104,9 @@ class GPU:
 
     @staticmethod
     def gen_framebuffers(size: int) -> list[int]:
-        """Gera posições para FrameBuffers."""
+        """
+        Gera posições para FrameBuffers.
+        """
         allocated: list[int] = []
         for _ in range(size):
             fbo = FrameBuffer()
@@ -100,7 +116,9 @@ class GPU:
 
     @staticmethod
     def bind_framebuffer(buffer: FramebufferTarget, position: int) -> None:
-        """Define o framebuffer a ser usado e como."""
+        """
+        Define o framebuffer a ser usado e como.
+        """
         if buffer == FramebufferTarget.DRAW_FRAMEBUFFER:
             GPU.draw_framebuffer = position
         elif buffer == FramebufferTarget.READ_FRAMEBUFFER:
@@ -112,7 +130,9 @@ class GPU:
     @staticmethod
     def framebuffer_storage(position: int, attachment: Attachment, mode: PixelFormat,
                             width: int, height: int) -> None:
-        """Aloca o FrameBuffer especificado."""
+        """
+        Aloca o FrameBuffer especificado.
+        """
         if attachment == Attachment.COLOR_ATTACHMENT:
             if mode == PixelFormat.RGB8:
                 dtype = np.uint8
@@ -134,17 +154,23 @@ class GPU:
 
     @staticmethod
     def clear_color(color: Sequence[float]) -> None:
-        """Definindo cor para apagar o FrameBuffer."""
+        """
+        Definindo cor para apagar o FrameBuffer.
+        """
         GPU.clear_color_val = color
 
     @staticmethod
     def clear_depth(depth: float) -> None:
-        """Definindo profundidade para apagar o FrameBuffer."""
+        """
+        Definindo profundidade para apagar o FrameBuffer.
+        """
         GPU.clear_depth_val = depth
 
     @staticmethod
     def clear_buffer() -> None:
-        """Usa o mesmo valor em todo o FrameBuffer, na prática apagando ele."""
+        """
+        Usa o mesmo valor em todo o FrameBuffer, na prática apagando ele.
+        """
         if GPU.frame_buffer[GPU.draw_framebuffer].color.size != 0:
             GPU.frame_buffer[GPU.draw_framebuffer].color[:] = GPU.clear_color_val
         if GPU.frame_buffer[GPU.draw_framebuffer].depth.size != 0:
@@ -152,7 +178,9 @@ class GPU:
 
     @staticmethod
     def draw_pixel(coord: Coord, mode: PixelFormat, data: PixelData) -> None:
-        """Define o valor do pixel no framebuffer."""
+        """
+        Define o valor do pixel no framebuffer.
+        """
         if coord and np.any(data):
             if mode in (PixelFormat.RGB8, PixelFormat.RGBA8):  # cores
 
@@ -163,19 +191,30 @@ class GPU:
                     fb_dim = GPU.frame_buffer[GPU.draw_framebuffer].color.shape
 
                     # Verifica se escrita é em um local válido
-                    if coord[0] < 0 or coord[0] >= fb_dim[1] or coord[1] < 0 or coord[1] >= fb_dim[0]:
-                        raise Exception(f"Acesso irregular de escrita na posição [{coord[0]}, {coord[1]}] do Framebuffer {fb_dim[1], fb_dim[0]}")
+                    fora_dos_limites = (coord[0] < 0 or coord[0] >= fb_dim[1]
+                                        or coord[1] < 0 or coord[1] >= fb_dim[0])
+                    if fora_dos_limites:
+                        raise Exception(
+                            f"Acesso irregular de escrita na posição [{coord[0]}, {coord[1]}] "
+                            f"do Framebuffer {fb_dim[1], fb_dim[0]}")
 
                     # Verifica se os dados estão no tamanho certo e em uma faixa suportada
-                    if isinstance(data, (list, tuple, np.ndarray)) and (len(data) == (mode+2)) and all( 0 <= i <= 255 for i in data):
+                    dados_validos = (isinstance(data, (list, tuple, np.ndarray))
+                                     and len(data) == (mode + 2)
+                                     and all(0 <= i <= 255 for i in data))
+                    if dados_validos:
                         # Grava dados no Framebuffer
                         GPU.frame_buffer[GPU.draw_framebuffer].color[coord[1]][coord[0]] = data
                     else:
-                        raise Exception(f"Valores do Frame buffer devem estar em um vetor de dimensão [{mode+2}] ser inteiros e estar entre 0 e 255")
+                        raise Exception(
+                            f"Valores do Frame buffer devem estar em um vetor de dimensão "
+                            f"[{mode+2}] ser inteiros e estar entre 0 e 255")
                 else:
-                    raise Exception(f"Frame buffer {GPU.draw_framebuffer} não alocado com o canal de cor")
+                    raise Exception(
+                        f"Frame buffer {GPU.draw_framebuffer} não alocado com o canal de cor")
 
-            elif mode in (PixelFormat.DEPTH_COMPONENT16, PixelFormat.DEPTH_COMPONENT32F):  # profundidade
+            elif mode in (PixelFormat.DEPTH_COMPONENT16,
+                        PixelFormat.DEPTH_COMPONENT32F):  # profundidade
 
                 #  Verifica se o Framebuffer do canal de profundidade foi alocado
                 if GPU.frame_buffer[GPU.draw_framebuffer].depth.size != 0:
@@ -184,26 +223,38 @@ class GPU:
                     fb_dim = GPU.frame_buffer[GPU.draw_framebuffer].depth.shape
 
                     # Verifica se escrita é em um local válido
-                    if coord[0] < 0 or coord[0] >= fb_dim[1] or coord[1] < 0 or coord[1] >= fb_dim[0]:
-                        raise Exception(f"Acesso irregular de escrita na posição [{coord[0]}, {coord[1]}] do Framebuffer {fb_dim[1], fb_dim[0]}")
+                    fora_dos_limites = (coord[0] < 0 or coord[0] >= fb_dim[1]
+                                        or coord[1] < 0 or coord[1] >= fb_dim[0])
+                    if fora_dos_limites:
+                        raise Exception(
+                            f"Acesso irregular de escrita na posição [{coord[0]}, {coord[1]}] "
+                            f"do Framebuffer {fb_dim[1], fb_dim[0]}")
 
                     # Verifica se os dados estão no tamanho certo e em um formato suportado
-                    if isinstance(data, (list, tuple, np.ndarray)) and (len(data)==1) and isinstance(data[0], (int, float)):
+                    dados_validos = (isinstance(data, (list, tuple, np.ndarray))
+                                     and len(data) == 1
+                                     and isinstance(data[0], (int, float)))
+                    if dados_validos:
                         # Grava dados no Framebuffer
                         GPU.frame_buffer[GPU.draw_framebuffer].depth[coord[1]][coord[0]] = data
                     else:
-                        raise Exception(f"Valores do Frame buffer devem ser um vetor com um único valor numérico: {data}")
+                        raise Exception(
+                            "Valores do Frame buffer devem ser um vetor com um único "
+                            f"valor numérico: {data}")
 
                 else:
-                    raise Exception(f"Frame buffer {GPU.draw_framebuffer} não alocado com o canal de profundidade")
+                    raise Exception(
+                        f"Frame buffer {GPU.draw_framebuffer} "
+                        "não alocado com o canal de profundidade")
 
             else:
                 raise Exception(f"Modo inválido de leitura do Frame buffer ({mode})")
 
-
     @staticmethod
     def read_pixel(coord: Coord, mode: PixelFormat) -> npt.NDArray[np.number] | None:
-        """Retorna o valor do pixel no framebuffer."""
+        """
+        Retorna o valor do pixel no framebuffer.
+        """
         data = None
         if coord:
             if mode in (PixelFormat.RGB8, PixelFormat.RGBA8):  # cores
@@ -215,15 +266,21 @@ class GPU:
                     fb_dim = GPU.frame_buffer[GPU.read_framebuffer].color.shape
 
                     # Verifica se leitura é em um local válido
-                    if coord[0] < 0 or coord[0] >= fb_dim[1] or coord[1] < 0 or coord[1] >= fb_dim[0]:
-                        raise Exception(f"Acesso irregular de leitura na posição [{coord[0]}, {coord[1]}] do Framebuffer {fb_dim[1], fb_dim[0]}")
+                    fora_dos_limites = (coord[0] < 0 or coord[0] >= fb_dim[1]
+                                        or coord[1] < 0 or coord[1] >= fb_dim[0])
+                    if fora_dos_limites:
+                        raise Exception(
+                            f"Acesso irregular de leitura na posição [{coord[0]}, {coord[1]}] "
+                            f"do Framebuffer {fb_dim[1], fb_dim[0]}")
 
                     data = GPU.frame_buffer[GPU.read_framebuffer].color[coord[1]][coord[0]]
 
                 else:
-                    raise Exception(f"Frame buffer {GPU.draw_framebuffer} não alocado com o canal de cor")
+                    raise Exception(
+                        f"Frame buffer {GPU.draw_framebuffer} não alocado com o canal de cor")
 
-            elif mode in (PixelFormat.DEPTH_COMPONENT16, PixelFormat.DEPTH_COMPONENT32F):  # profundidade
+            elif mode in (PixelFormat.DEPTH_COMPONENT16,
+                        PixelFormat.DEPTH_COMPONENT32F):  # profundidade
 
                 #  Verifica se o Framebuffer do canal de profundidade foi alocado
                 if GPU.frame_buffer[GPU.draw_framebuffer].depth.size != 0:
@@ -232,13 +289,19 @@ class GPU:
                     fb_dim = GPU.frame_buffer[GPU.read_framebuffer].depth.shape
 
                     # Verifica se leitura é em um local válido
-                    if coord[0] < 0 or coord[0] >= fb_dim[1] or coord[1] < 0 or coord[1] >= fb_dim[0]:
-                        raise Exception(f"Acesso irregular de leitura na posição [{coord[0]}, {coord[1]}] do Framebuffer {fb_dim[1], fb_dim[0]}")
+                    fora_dos_limites = (coord[0] < 0 or coord[0] >= fb_dim[1]
+                                        or coord[1] < 0 or coord[1] >= fb_dim[0])
+                    if fora_dos_limites:
+                        raise Exception(
+                            f"Acesso irregular de leitura na posição [{coord[0]}, {coord[1]}] "
+                            f"do Framebuffer {fb_dim[1], fb_dim[0]}")
 
                     data = GPU.frame_buffer[GPU.read_framebuffer].depth[coord[1]][coord[0]]
 
                 else:
-                    raise Exception(f"Frame buffer {GPU.draw_framebuffer} não alocado com o canal de profundidade")
+                    raise Exception(
+                        f"Frame buffer {GPU.draw_framebuffer} "
+                        "não alocado com o canal de profundidade")
 
             else:
                 raise Exception(f"Modo inválido de leitura do Frame buffer ({mode})")
@@ -249,7 +312,9 @@ class GPU:
 
     @staticmethod
     def save_image() -> None:
-        """Método para salvar a imagem do framebuffer em um arquivo."""
+        """
+        Método para salvar a imagem do framebuffer em um arquivo.
+        """
         if GPU.frame_buffer[GPU.read_framebuffer].color.shape[2] == 3:
             img = Image.fromarray(GPU.frame_buffer[GPU.read_framebuffer].color, 'RGB')
         else:
@@ -262,7 +327,9 @@ class GPU:
 
     @staticmethod
     def load_texture(textura: str) -> npt.NDArray[np.uint8]:
-        """Método para ler textura."""
+        """
+        Método para ler textura.
+        """
         file = os.path.join(GPU.path, textura)
         imagem = Image.open(file).transpose(Image.Transpose.TRANSPOSE)
         matriz = np.array(imagem, dtype=np.uint8)
@@ -270,9 +337,13 @@ class GPU:
 
     @staticmethod
     def get_frame_buffer() -> npt.NDArray[np.uint8]:
-        """Retorna o Framebuffer atual para leitura."""
+        """
+        Retorna o Framebuffer atual para leitura.
+        """
         return GPU.frame_buffer[GPU.read_framebuffer].color
 
     @staticmethod
     def swap_buffers() -> None:
-        """Método para a troca dos buffers (NÃO IMPLEMENTADA)."""
+        """
+        Método para a troca dos buffers (NÃO IMPLEMENTADA).
+        """

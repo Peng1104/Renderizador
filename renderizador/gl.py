@@ -11,16 +11,19 @@ Disciplina: Computação Gráfica
 Data: 19/08/2026
 """
 
-import time         # Para operações com tempo
-import gpu          # Simula os recursos de uma GPU
-import math         # Funções matemáticas
+import math  # Funções matemáticas
+import time  # Para operações com tempo
+from typing import ClassVar, TypedDict
+
+import gpu  # Simula os recursos de uma GPU
 import numpy as np  # Biblioteca do Numpy
 import numpy.typing as npt
-from typing import ClassVar, TypedDict
 
 
 class Colors(TypedDict):
-    """Conjunto de cores resolvidas a partir de um nó Appearance/Material."""
+    """
+    Conjunto de cores resolvidas a partir de um nó Appearance/Material.
+    """
 
     diffuseColor: list[float]
     emissiveColor: list[float]
@@ -30,26 +33,137 @@ class Colors(TypedDict):
     ambientIntensity: float
 
 class Pointo2D:
-    """Classe que representa um ponto 2D."""
+    """
+    Classe que representa um ponto 2D.
+    """
 
     x: int
     y: int
 
 class GL:
-    """Classe que representa a biblioteca gráfica (Graphics Library)."""
+    """
+    Classe que representa a biblioteca gráfica (Graphics Library).
+    """
 
     width: ClassVar[int]  # largura da tela
     height: ClassVar[int] # altura da tela
     near: ClassVar[float] # plano de corte próximo
     far: ClassVar[float]  # plano de corte distante
 
+    # Matriz view (mundo -> câmera) e de projeção perspectiva (câmera -> clip),
+    # calculadas em GL.viewpoint(). Identidade até que um Viewpoint seja lido.
+    view_matrix: ClassVar[npt.NDArray[np.float64]]
+    perspective_matrix: ClassVar[npt.NDArray[np.float64]]
+
+    # Pilha de matrizes de transformação (objeto -> mundo). O topo (última posição)
+    # é a matriz corrente, acumulada dos Transforms ancestrais no grafo de cena.
+    transform_stack: ClassVar[list[npt.NDArray[np.float64]]]
+
     @staticmethod
     def setup(width: int, height: int, near: float = 0.01, far: float = 1000) -> None:
-        """Definr parametros para câmera de razão de aspecto, plano próximo e distante."""
+        """
+        Definr parametros para câmera de razão de aspecto, plano próximo e distante.
+        """
         GL.width = width
         GL.height = height
         GL.near = near
         GL.far = far
+        GL.view_matrix = np.identity(4)
+        GL.perspective_matrix = np.identity(4)
+        GL.transform_stack = [np.identity(4)]
+
+    @staticmethod
+    def _translation_matrix(t: list[float]) -> npt.NDArray[np.float64]:
+        """
+        Monta a matriz 4x4 homogênea de translação.
+        """
+        m = np.identity(4)
+        m[:3, 3] = t
+        return m
+
+    @staticmethod
+    def _scale_matrix(s: list[float]) -> npt.NDArray[np.float64]:
+        """
+        Monta a matriz 4x4 homogênea de escala.
+        """
+        m = np.identity(4)
+        m[0, 0], m[1, 1], m[2, 2] = s
+        return m
+
+    @staticmethod
+    def _axis_angle_to_quaternion(rotation: list[float]) -> npt.NDArray[np.float64]:
+        """
+        Converte eixo [x, y, z] e ângulo t (radianos) num quatérnio unitário.
+
+        Segue a regra da mão direita. Retorna [w, x, y, z], com w=1 (identidade)
+        quando o eixo é nulo.
+        """
+        eixo = np.asarray(rotation[:3], dtype=np.float64)
+        norma = np.linalg.norm(eixo)
+
+        if norma == 0:
+            return np.array([1.0, 0.0, 0.0, 0.0])
+
+        eixo = eixo / norma
+        t = rotation[3]
+        metade = t / 2
+        return np.array([math.cos(metade), *(eixo * math.sin(metade))])
+
+    @staticmethod
+    def _quaternion_to_rotation_matrix(q: npt.NDArray[np.float64]) -> npt.NDArray[np.float64]:
+        """
+        Monta a matriz 4x4 homogênea de rotação a partir de um quatérnio unitário [w, x, y, z].
+        """
+        w, x, y, z = q
+
+        # Fórmula padrão de conversão quatérnio unitário -> matriz de rotação,
+        # obtida expandindo a rotação de um vetor v por v' = q*v*q⁻¹:
+        # - Diagonal: cada eixo permanece 1 menos a contribuição dos OUTROS dois
+        #   componentes da parte vetorial (ex: R[0][0]=1-2(y²+z²), a rotação em
+        #   torno de x não deveria afetar o próprio x, só y e z, evitar o gimbal lock).
+        # - Fora da diagonal: cada par (i,j) tem um termo simétrico de produto
+        #   cruzado 2*qi*qj (a parte "linear" da rotação, do termo q_v⊗q_v) somado
+        #   ou subtraído de um termo 2*w*qk (a parte "antissimétrica" que vem do
+        #   termo w*[q_v]×, troca de sinal conforme (i,j,k) seguem a regra da
+        #   mão direita, por isso R[i][j] e R[j][i] têm o termo 2*w*qk com sinais opostos).
+
+        m = np.identity(4)
+        m[:3, :3] = np.array([
+            [1 - 2 * (y * y + z * z), 2 * (x * y - w * z),     2 * (x * z + w * y)],
+            [2 * (x * y + w * z),     1 - 2 * (x * x + z * z), 2 * (y * z - w * x)],
+            [2 * (x * z - w * y),     2 * (y * z + w * x),     1 - 2 * (x * x + y * y)],
+        ])
+        return m
+
+    @staticmethod
+    def _rotation_matrix(rotation: list[float]) -> npt.NDArray[np.float64]:
+        """
+        Monta a matriz 4x4 homogênea de rotação a partir de eixo e ângulo.
+
+        Eixo [x, y, z] e ângulo t (radianos), seguindo a regra da mão direita.
+        """
+        return GL._quaternion_to_rotation_matrix(GL._axis_angle_to_quaternion(rotation))
+
+    @staticmethod
+    def _perspective_matrix(field_of_view: float, aspect: float, near: float,
+                            far: float) -> npt.NDArray[np.float64]:
+        """
+        Monta a matriz de projeção perspectiva.
+
+        Recebe o campo de visão vertical (já ajustado à razão de aspecto),
+        a razão de aspecto e os planos de corte próximo e distante.
+        """
+        top = near * math.tan(field_of_view / 2)
+        right = top * aspect
+        z_escala = -(far + near) / (far - near)
+        z_translacao = -2 * far * near / (far - near)
+
+        return np.array([
+            [near / right, 0,          0,           0],
+            [0,            near / top, 0,           0],
+            [0,            0,          z_escala,    z_translacao],
+            [0,            0,          -1,          0],
+        ], dtype=np.float64)
 
     # Matrizes de reflexão e rotação usadas para gerar
     # os 8 octantes simétricos de um círculo a partir de um único octante calculado.
@@ -62,21 +176,28 @@ class GL:
 
     @staticmethod
     def _round(valor: npt.ArrayLike) -> npt.NDArray[np.float64]:
-        """Arredonda 'metade para cima' (o round/np.round padrão usa round-half-to-even,
-        que gera saltos de pixel quando coordenadas caem exatamente em .5)."""
-        return np.floor(np.asarray(valor) + 0.5)
+        """
+        Converte coordenada contínua para índice de pixel.
+
+        Cada pixel n cobre o intervalo [n, n+1), entao o indice correto e o
+        piso da coordenada.
+        """
+        return np.floor(np.asarray(valor, dtype=np.float64))
 
     @staticmethod
     def _to_rgb8(cor: list[float]) -> npt.NDArray[np.int64]:
-        """Converte uma cor X3D (0 a 1) para o intervalo 0-255 do matplotlib."""
+        """
+        Converte uma cor X3D (0 a 1) para o intervalo 0-255 usado pelo matplotlib.
+        """
         return np.clip(
             GL._round(np.asarray(cor, dtype=np.float64) * 255), 0, 255).astype(np.int64).tolist()
 
     @staticmethod
     def _draw_points(xs: npt.NDArray[np.int64], ys: npt.NDArray[np.int64],
                      cor: list[int] | npt.NDArray[np.int64]) -> None:
-        """Desenha um conjunto de pixels, descartando os que caem fora da tela."""
-
+        """
+        Desenha um conjunto de pixels, descartando os que caem fora da tela.
+        """
         dentro = (xs >= 0) & (xs < GL.width) & (ys >= 0) & (ys < GL.height)
 
         for x, y in zip(xs[dentro].tolist(), ys[dentro].tolist()):
@@ -86,7 +207,8 @@ class GL:
     def _line_points(x0: float, y0: float, x1: float,
                      y1: float) -> tuple[npt.NDArray[np.int64], npt.NDArray[np.int64]]:
         """
-        Interpola os pontos de uma linha entre dois pontos. 
+        Interpola os pontos de uma linha entre dois pontos.
+
         (bremsenham, mas usando numpy para vetorização)
         """
         steps = max(round(abs(x1 - x0)), round(abs(y1 - y0)), 1)
@@ -100,10 +222,10 @@ class GL:
     def _fill_triangle(x0: float, y0: float, x1: float, y1: float,
                        x2: float, y2: float, cor: npt.NDArray[np.int64]) -> None:
         """
-        Preenche um triângulo 2D usando funções de aresta calculadas 
-        por multiplicação de matrizes.
-        """
+        Preenche um triângulo 2D.
 
+        Usa funções de aresta calculadas por multiplicação de matrizes.
+        """
         min_x = max(0, math.floor(min(x0, x1, x2)))
         max_x = min(GL.width - 1, math.ceil(max(x0, x1, x2)))
         min_y = max(0, math.floor(min(y0, y1, y2)))
@@ -148,17 +270,19 @@ class GL:
 
     @staticmethod
     def polypoint2D(point: list[float], colors: Colors) -> None:
-        """Função usada para renderizar Polypoint2D."""
-        
+        """
+        Função usada para renderizar Polypoint2D.
+        """
         cor = GL._to_rgb8(colors["emissiveColor"])
-        pontos = np.round(np.asarray(point).reshape(-1, 2)).astype(np.int64)
+        pontos = GL._round(np.asarray(point).reshape(-1, 2)).astype(np.int64)
 
         GL._draw_points(pontos[:, 0], pontos[:, 1], cor)
 
     @staticmethod
     def polyline2D(lineSegments: list[float], colors: Colors) -> None:
-        """Função usada para renderizar Polyline2D."""
-
+        """
+        Função usada para renderizar Polyline2D.
+        """
         cor = GL._to_rgb8(colors["emissiveColor"])
         pontos = np.asarray(lineSegments, dtype=np.float64).reshape(-1, 2)
 
@@ -168,8 +292,9 @@ class GL:
 
     @staticmethod
     def circle2D(radius: float, colors: Colors) -> None:
-        """Função usada para renderizar Circle2D."""
-
+        """
+        Função usada para renderizar Circle2D.
+        """
         cor = GL._to_rgb8(colors["emissiveColor"])
         r = round(radius)
 
@@ -189,7 +314,9 @@ class GL:
 
     @staticmethod
     def triangleSet2D(vertices: list[float], colors: Colors) -> None:
-        """Função usada para renderizar TriangleSet2D."""
+        """
+        Função usada para renderizar TriangleSet2D.
+        """
         cor = GL._to_rgb8(colors["emissiveColor"])
 
         for i in range(0, len(vertices) - 5, 6):
@@ -201,79 +328,96 @@ class GL:
 
     @staticmethod
     def triangleSet(point: list[float], colors: Colors) -> None:
-        """Função usada para renderizar TriangleSet."""
-        # https://www.web3d.org/specifications/X3Dv4/ISO-IEC19775-1v4-IS/Part01/components/rendering.html#TriangleSet
-        # Nessa função você receberá pontos no parâmetro point, esses pontos são uma lista
-        # de pontos x, y, e z sempre na ordem. Assim point[0] é o valor da coordenada x do
-        # primeiro ponto, point[1] o valor y do primeiro ponto, point[2] o valor z da
-        # coordenada z do primeiro ponto. Já point[3] é a coordenada x do segundo ponto e
-        # assim por diante.
-        # No TriangleSet os triângulos são informados individualmente, assim os três
-        # primeiros pontos definem um triângulo, os três próximos pontos definem um novo
-        # triângulo, e assim por diante.
-        # O parâmetro colors é um dicionário com os tipos cores possíveis, você pode assumir
-        # inicialmente, para o TriangleSet, o desenho das linhas com a cor emissiva
-        # (emissiveColor), conforme implementar novos materias você deverá suportar outros
-        # tipos de cores.
+        """
+        Função usada para renderizar TriangleSet.
+        """
+        cor = GL._to_rgb8(colors["emissiveColor"])
 
-        # O print abaixo é só para vocês verificarem o funcionamento, DEVE SER REMOVIDO.
-        print("TriangleSet : pontos = {0}".format(point)) # imprime no terminal pontos
-        print("TriangleSet : colors = {0}".format(colors)) # imprime no terminal as cores
+        # Matriz completa: objeto -> mundo -> câmera -> clip.
+        transformacao = GL.perspective_matrix @ GL.view_matrix @ GL.transform_stack[-1]
 
-        # Exemplo de desenho de um pixel branco na coordenada 10, 10
-        gpu.GPU.draw_pixel([10, 10], gpu.PixelFormat.RGB8, [255, 255, 255])  # altera pixel
+        pontos = np.asarray(point, dtype=np.float64).reshape(-1, 3)
+        homogeneos = np.hstack([pontos, np.ones((pontos.shape[0], 1))])
+
+        clip = (transformacao @ homogeneos.T).T
+        # Divisão de perspectiva: normaliza pelo componente w.
+        ndc = clip[:, :3] / clip[:, 3:4]
+
+        # Mapeia de NDC ([-1, 1]) para coordenadas de tela (eixo y invertido).
+        tela_x = (ndc[:, 0] + 1) / 2 * GL.width
+        tela_y = (1 - ndc[:, 1]) / 2 * GL.height
+
+        for i in range(0, len(tela_x) - 2, 3):
+            GL._fill_triangle(tela_x[i], tela_y[i],
+                              tela_x[i + 1], tela_y[i + 1],
+                              tela_x[i + 2], tela_y[i + 2], cor)
 
     @staticmethod
     def viewpoint(position: list[float], orientation: list[float], fieldOfView: float) -> None:
-        """Função usada para renderizar (na verdade coletar os dados) de Viewpoint."""
-        # Na função de viewpoint você receberá a posição, orientação e campo de visão da
-        # câmera virtual. Use esses dados para poder calcular e criar a matriz de projeção
-        # perspectiva para poder aplicar nos pontos dos objetos geométricos.
+        """
+        Função usada para renderizar (na verdade coletar os dados) de Viewpoint.
+        """
+        # Matriz de transformação da câmera (câmera -> mundo): rotação seguida de translação.
+        camera_para_mundo = GL._translation_matrix(position) @ GL._rotation_matrix(orientation)
 
-        # O print abaixo é só para vocês verificarem o funcionamento, DEVE SER REMOVIDO.
-        print("Viewpoint : ", end='')
-        print("position = {0} ".format(position), end='')
-        print("orientation = {0} ".format(orientation), end='')
-        print("fieldOfView = {0} ".format(fieldOfView))
+        # A view é a inversa: para uma matriz de rotação + translação, a inversa é a
+        # transposta do bloco de rotação seguida da translação negada.
+        GL.view_matrix = np.linalg.inv(camera_para_mundo)
+
+        aspect = GL.width / GL.height
+
+        # O fieldOfView do X3D se aplica à menor dimensão da tela sem alteração; a maior
+        # dimensão recebe o ângulo mais largo, calculado a partir da razão de aspecto.
+        if aspect > 1:  # tela mais larga que alta: a vertical (menor) recebe o fov cru
+            fovy = fieldOfView
+        else:  # tela mais alta que larga: a horizontal (menor) recebe o fov cru
+            fovy = 2 * math.atan(math.tan(fieldOfView / 2) / aspect)
+
+        GL.perspective_matrix = GL._perspective_matrix(fovy, aspect, GL.near, GL.far)
 
     @staticmethod
     def transform_in(translation: list[float], scale: list[float], rotation: list[float]) -> None:
-        """Função usada para renderizar (na verdade coletar os dados) de Transform."""
+        """
+        Função usada para renderizar (na verdade coletar os dados) de Transform.
+        """
         # A função transform_in será chamada quando se entrar em um nó X3D do tipo Transform
         # do grafo de cena. Os valores passados são a escala em um vetor [x, y, z]
         # indicando a escala em cada direção, a translação [x, y, z] nas respectivas
         # coordenadas e finalmente a rotação por [x, y, z, t] sendo definida pela rotação
         # do objeto ao redor do eixo x, y, z por t radianos, seguindo a regra da mão direita.
-        # ESSES NÃO SÃO OS VALORES DE QUATÉRNIOS AS CONTAS AINDA PRECISAM SER FEITAS.
         # Quando se entrar em um nó transform se deverá salvar a matriz de transformação dos
-        # modelos do mundo para depois potencialmente usar em outras chamadas. 
-        # Quando começar a usar Transforms dentre de outros Transforms, mais a frente no curso
-        # Você precisará usar alguma estrutura de dados pilha para organizar as matrizes.
+        # modelos do mundo para depois potencialmente usar em outras chamadas.
+        # Quando se usa Transforms dentro de outros Transforms, a matriz corrente acumula
+        # sobre o topo da pilha, que guarda a transformação do Transform ancestral.
 
-        # O print abaixo é só para vocês verificarem o funcionamento, DEVE SER REMOVIDO.
-        print("Transform : ", end='')
-        if translation:
-            print("translation = {0} ".format(translation), end='') # imprime no terminal
-        if scale:
-            print("scale = {0} ".format(scale), end='') # imprime no terminal
-        if rotation:
-            print("rotation = {0} ".format(rotation), end='') # imprime no terminal
-        print("")
+        t = translation if translation else [0.0, 0.0, 0.0]
+        s = scale if scale else [1.0, 1.0, 1.0]
+        r = rotation if rotation else [0.0, 0.0, 1.0, 0.0]
+
+        # Ordem de aplicação em um ponto local: primeiro escala, depois rotação,
+        # depois translação — ou seja, local_para_pai = T @ R @ S.
+        local_para_pai = GL._translation_matrix(t) @ GL._rotation_matrix(r) @ GL._scale_matrix(s)
+
+        local_para_mundo = GL.transform_stack[-1] @ local_para_pai
+        GL.transform_stack.append(local_para_mundo)
 
     @staticmethod
     def transform_out() -> None:
-        """Função usada para renderizar (na verdade coletar os dados) de Transform."""
+        """
+        Função usada para renderizar (na verdade coletar os dados) de Transform.
+        """
         # A função transform_out será chamada quando se sair em um nó X3D do tipo Transform do
         # grafo de cena. Não são passados valores, porém quando se sai de um nó transform se
         # deverá recuperar a matriz de transformação dos modelos do mundo da estrutura de
         # pilha implementada.
 
-        # O print abaixo é só para vocês verificarem o funcionamento, DEVE SER REMOVIDO.
-        print("Saindo de Transform")
+        GL.transform_stack.pop()
 
     @staticmethod
     def triangleStripSet(point: list[float], stripCount: list[int], colors: Colors) -> None:
-        """Função usada para renderizar TriangleStripSet."""
+        """
+        Função usada para renderizar TriangleStripSet.
+        """
         # https://www.web3d.org/specifications/X3Dv4/ISO-IEC19775-1v4-IS/Part01/components/rendering.html#TriangleStripSet
         # A função triangleStripSet é usada para desenhar tiras de triângulos interconectados,
         # você receberá as coordenadas dos pontos no parâmetro point, esses pontos são uma
@@ -298,7 +442,9 @@ class GL:
 
     @staticmethod
     def indexedTriangleStripSet(point: list[float], index: list[int], colors: Colors) -> None:
-        """Função usada para renderizar IndexedTriangleStripSet."""
+        """
+        Função usada para renderizar IndexedTriangleStripSet.
+        """
         # https://www.web3d.org/specifications/X3Dv4/ISO-IEC19775-1v4-IS/Part01/components/rendering.html#IndexedTriangleStripSet
         # A função indexedTriangleStripSet é usada para desenhar tiras de triângulos
         # interconectados, você receberá as coordenadas dos pontos no parâmetro point, esses
@@ -324,7 +470,9 @@ class GL:
                        color: list[float], colorIndex: list[int],
                        texCoord: list[float], texCoordIndex: list[int],
                        colors: Colors, current_texture: list[str]) -> None:
-        """Função usada para renderizar IndexedFaceSet."""
+        """
+        Função usada para renderizar IndexedFaceSet.
+        """
         # https://www.web3d.org/specifications/X3Dv4/ISO-IEC19775-1v4-IS/Part01/components/geometry3D.html#IndexedFaceSet
         # A função indexedFaceSet é usada para desenhar malhas de triângulos. Ela funciona de
         # forma muito simular a IndexedTriangleStripSet porém com mais recursos.
@@ -334,9 +482,10 @@ class GL:
         # o valor z da coordenada z do primeiro ponto. Já coord[3] é a coordenada x do
         # segundo ponto e assim por diante. No IndexedFaceSet uma lista de vértices é informada
         # em coordIndex, o valor -1 indica que a lista acabou.
-        # A ordem de conexão não possui uma ordem oficial, mas em geral se o primeiro ponto com os dois
-        # seguintes e depois este mesmo primeiro ponto com o terçeiro e quarto ponto. Por exemplo: numa
-        # sequencia 0, 1, 2, 3, 4, -1 o primeiro triângulo será com os vértices 0, 1 e 2, depois serão
+        # A ordem de conexão não possui uma ordem oficial, mas em geral se o primeiro ponto
+        # com os dois seguintes e depois este mesmo primeiro ponto com o terçeiro e quarto
+        # ponto. Por exemplo: numa sequencia 0, 1, 2, 3, 4, -1 o primeiro triângulo será
+        # com os vértices 0, 1 e 2, depois serão
         # os vértices 0, 2 e 3, e depois 0, 3 e 4, e assim por diante, até chegar no final da lista.
         # Adicionalmente essa implementação do IndexedFace aceita cores por vértices, assim
         # se a flag colorPerVertex estiver habilitada, os vértices também possuirão cores
@@ -366,7 +515,9 @@ class GL:
 
     @staticmethod
     def box(size: list[float], colors: Colors) -> None:
-        """Função usada para renderizar Boxes."""
+        """
+        Função usada para renderizar Boxes.
+        """
         # https://www.web3d.org/specifications/X3Dv4/ISO-IEC19775-1v4-IS/Part01/components/geometry3D.html#Box
         # A função box é usada para desenhar paralelepípedos na cena. O Box é centrada no
         # (0, 0, 0) no sistema de coordenadas local e alinhado com os eixos de coordenadas
@@ -384,7 +535,9 @@ class GL:
 
     @staticmethod
     def sphere(radius: float, colors: Colors) -> None:
-        """Função usada para renderizar Esferas."""
+        """
+        Função usada para renderizar Esferas.
+        """
         # https://www.web3d.org/specifications/X3Dv4/ISO-IEC19775-1v4-IS/Part01/components/geometry3D.html#Sphere
         # A função sphere é usada para desenhar esferas na cena. O esfera é centrada no
         # (0, 0, 0) no sistema de coordenadas local. O argumento radius especifica o
@@ -398,7 +551,9 @@ class GL:
 
     @staticmethod
     def cone(bottomRadius: float, height: float, colors: Colors) -> None:
-        """Função usada para renderizar Cones."""
+        """
+        Função usada para renderizar Cones.
+        """
         # https://www.web3d.org/specifications/X3Dv4/ISO-IEC19775-1v4-IS/Part01/components/geometry3D.html#Cone
         # A função cone é usada para desenhar cones na cena. O cone é centrado no
         # (0, 0, 0) no sistema de coordenadas local. O argumento bottomRadius especifica o
@@ -408,18 +563,21 @@ class GL:
         # encontre os vértices e defina os triângulos.
 
         # O print abaixo é só para vocês verificarem o funcionamento, DEVE SER REMOVIDO.
-        print("Cone : bottomRadius = {0}".format(bottomRadius)) # imprime no terminal o raio da base do cone
+        print("Cone : bottomRadius = {0}".format(bottomRadius)) # imprime no terminal o raio da base
         print("Cone : height = {0}".format(height)) # imprime no terminal a altura do cone
         print("Cone : colors = {0}".format(colors)) # imprime no terminal as cores
 
     @staticmethod
     def cylinder(radius: float, height: float, colors: Colors) -> None:
-        """Função usada para renderizar Cilindros."""
+        """
+        Função usada para renderizar Cilindros.
+        """
         # https://www.web3d.org/specifications/X3Dv4/ISO-IEC19775-1v4-IS/Part01/components/geometry3D.html#Cylinder
         # A função cylinder é usada para desenhar cilindros na cena. O cilindro é centrado no
         # (0, 0, 0) no sistema de coordenadas local. O argumento radius especifica o
         # raio da base do cilindro e o argumento height especifica a altura do cilindro.
-        # O cilindro é alinhado com o eixo Y local. O cilindro é fechado por padrão em ambas as extremidades.
+        # O cilindro é alinhado com o eixo Y local. O cilindro é fechado por padrão em
+        # ambas as extremidades.
         # Para desenha esse cilindro você vai precisar tesselar ele em triângulos, para isso
         # encontre os vértices e defina os triângulos.
 
@@ -430,7 +588,9 @@ class GL:
 
     @staticmethod
     def navigationInfo(headlight: bool) -> None:
-        """Características físicas do avatar do visualizador e do modelo de visualização."""
+        """
+        Características físicas do avatar do visualizador e do modelo de visualização.
+        """
         # https://www.web3d.org/specifications/X3Dv4/ISO-IEC19775-1v4-IS/Part01/components/navigation.html#NavigationInfo
         # O campo do headlight especifica se um navegador deve acender um luz direcional que
         # sempre aponta na direção que o usuário está olhando. Definir este campo como TRUE
@@ -444,7 +604,9 @@ class GL:
     @staticmethod
     def directionalLight(ambientIntensity: float, color: list[float], intensity: float,
                          direction: list[float]) -> None:
-        """Luz direcional ou paralela."""
+        """
+        Luz direcional ou paralela.
+        """
         # https://www.web3d.org/specifications/X3Dv4/ISO-IEC19775-1v4-IS/Part01/components/lighting.html#DirectionalLight
         # Define uma fonte de luz direcional que ilumina ao longo de raios paralelos
         # em um determinado vetor tridimensional. Possui os campos básicos ambientIntensity,
@@ -461,7 +623,9 @@ class GL:
     @staticmethod
     def pointLight(ambientIntensity: float, color: list[float], intensity: float,
                   location: list[float]) -> None:
-        """Luz pontual."""
+        """
+        Luz pontual.
+        """
         # https://www.web3d.org/specifications/X3Dv4/ISO-IEC19775-1v4-IS/Part01/components/lighting.html#PointLight
         # Fonte de luz pontual em um local 3D no sistema de coordenadas local. Uma fonte
         # de luz pontual emite luz igualmente em todas as direções; ou seja, é omnidirecional.
@@ -477,7 +641,9 @@ class GL:
 
     @staticmethod
     def fog(visibilityRange: float, color: list[float]) -> None:
-        """Névoa."""
+        """
+        Névoa.
+        """
         # https://www.web3d.org/specifications/X3Dv4/ISO-IEC19775-1v4-IS/Part01/components/environmentalEffects.html#Fog
         # O nó Fog fornece uma maneira de simular efeitos atmosféricos combinando objetos
         # com a cor especificada pelo campo de cores com base nas distâncias dos
@@ -493,7 +659,9 @@ class GL:
 
     @staticmethod
     def timeSensor(cycleInterval: float, loop: bool) -> float:
-        """Gera eventos conforme o tempo passa."""
+        """
+        Gera eventos conforme o tempo passa.
+        """
         # https://www.web3d.org/specifications/X3Dv4/ISO-IEC19775-1v4-IS/Part01/components/time.html#TimeSensor
         # Os nós TimeSensor podem ser usados para muitas finalidades, incluindo:
         # Condução de simulações e animações contínuas; Controlar atividades periódicas;
@@ -518,7 +686,9 @@ class GL:
     @staticmethod
     def splinePositionInterpolator(set_fraction: float, key: list[float], keyValue: list[float],
                                    closed: bool) -> list[float]:
-        """Interpola não linearmente entre uma lista de vetores 3D."""
+        """
+        Interpola não linearmente entre uma lista de vetores 3D.
+        """
         # https://www.web3d.org/specifications/X3Dv4/ISO-IEC19775-1v4-IS/Part01/components/interpolators.html#SplinePositionInterpolator
         # Interpola não linearmente entre uma lista de vetores 3D. O campo keyValue possui
         # uma lista com os valores a serem interpolados, key possui uma lista respectiva de chaves
@@ -542,7 +712,9 @@ class GL:
     @staticmethod
     def orientationInterpolator(set_fraction: float, key: list[float],
                                 keyValue: list[float]) -> list[float]:
-        """Interpola entre uma lista de valores de rotação especificos."""
+        """
+        Interpola entre uma lista de valores de rotação especificos.
+        """
         # https://www.web3d.org/specifications/X3Dv4/ISO-IEC19775-1v4-IS/Part01/components/interpolators.html#OrientationInterpolator
         # Interpola rotações são absolutas no espaço do objeto e, portanto, não são cumulativas.
         # Uma orientação representa a posição final de um objeto após a aplicação de uma rotação.
@@ -567,7 +739,11 @@ class GL:
 
     # Para o futuro (Não para versão atual do projeto.)
     def vertex_shader(self, shader: str) -> None:
-        """Para no futuro implementar um vertex shader."""
+        """
+        Para no futuro implementar um vertex shader.
+        """
 
     def fragment_shader(self, shader: str) -> None:
-        """Para no futuro implementar um fragment shader."""
+        """
+        Para no futuro implementar um fragment shader.
+        """

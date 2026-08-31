@@ -1,8 +1,16 @@
-#from treelib import Node, Tree
+"""
+Impressão do grafo de cena no console.
+"""
+
+# from treelib import Node, Tree
 import xml.etree.ElementTree as ET
 
-# Desenha o Grafo de Cena no console
+
 class Graph:
+    """
+    Desenha o Grafo de Cena no console.
+    """
+
     # def parse(self, node):
     #     for child in node:
     #         tag = child.tag + (" "+str(child.attrib) if child.attrib else "")

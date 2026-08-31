@@ -9,22 +9,21 @@ Disciplina: Computação Gráfica
 Data: 31 de Agosto de 2020
 """
 
-import time         # Para operações com tempo, como a duração de renderização
+import time  # Para operações com tempo, como a duração de renderização
 from typing import Callable, ClassVar
 
-import numpy as np  # Para operações matemáticas
-import numpy.typing as npt
-
-# Matplotlib
-import matplotlib.pyplot as plt
-from matplotlib.artist import Artist
-from matplotlib.backend_bases import Event
-from matplotlib.ticker import MultipleLocator
-from matplotlib.widgets import Button, TextBox, CheckButtons
 import matplotlib.animation as animation
 import matplotlib.patheffects as path_effects
 
+# Matplotlib
+import matplotlib.pyplot as plt
+import numpy as np  # Para operações matemáticas
+import numpy.typing as npt
 import x3d
+from matplotlib.artist import Artist
+from matplotlib.backend_bases import Event
+from matplotlib.ticker import MultipleLocator
+from matplotlib.widgets import Button, CheckButtons, TextBox
 from x3d import Circulo, Linha, Poligono, Ponto
 
 # matplotlib 3.11.1 wraps TextBox._resize with a decorator meant for mouse
@@ -34,7 +33,9 @@ TextBox._resize = lambda self, event: self.stop_typing()  # pyright: ignore[repo
 
 
 class Interface:
-    """Interface para usuário/desenvolvedor verificar resultados da renderização."""
+    """
+    Interface para usuário/desenvolvedor verificar resultados da renderização.
+    """
 
     pontos: ClassVar[list[Ponto]] = []        # pontos a serem desenhados
     linhas: ClassVar[list[Linha]] = []        # linhas a serem desenhadas
@@ -44,7 +45,9 @@ class Interface:
     last_time: ClassVar[float] = 0      # para calculo de FPS
 
     def __init__(self, width: int, height: int, filename: str) -> None:
-        """Inicializa Interface Gráfica."""
+        """
+        Inicializa Interface Gráfica.
+        """
         self.width = width
         self.height = height
 
@@ -70,7 +73,8 @@ class Interface:
         self.fig.subplots_adjust(left=0.08, right=0.76, bottom=0.15, top=0.98)
         self.fig.tight_layout(rect=(0, 0.05, 1, 0.98))
 
-        self.axes.axis((0, width, height, 0))  # (xmin, xmax, ymin, ymax)  # pyright: ignore[reportUnknownMemberType]
+        # (xmin, xmax, ymin, ymax)
+        self.axes.axis((0, width, height, 0))  # pyright: ignore[reportUnknownMemberType]
 
         self.axes.xaxis.tick_top()
 
@@ -90,7 +94,9 @@ class Interface:
         self.axes.yaxis.set_minor_locator(MultipleLocator(divisions//10))
 
     def annotation(self, points: list[list[float]]) -> None:
-        """Desenha texto ao lado dos pontos identificando eles."""
+        """
+        Desenha texto ao lado dos pontos identificando eles.
+        """
         dist_label = 5 # distância do label para o ponto
         for i, pos in enumerate(points):
             text = self.axes.annotate("P{0}".format(i), xy=(pos[0], pos[1]),  # pyright: ignore[reportUnknownMemberType]
@@ -99,7 +105,9 @@ class Interface:
             self.geometrias.append(text)
 
     def draw_points(self, point: Ponto, text: bool = False) -> None:
-        """Exibe pontos na tela da interface gráfica."""
+        """
+        Exibe pontos na tela da interface gráfica.
+        """
         points = point["points"]
         color = x3d.get_colors(point["appearance"])["emissiveColor"]
 
@@ -108,7 +116,9 @@ class Interface:
         y_values = [pt[1] for pt in points]
 
         # desenha as linhas com os pontos
-        dots, = self.axes.plot(x_values, y_values, marker='o', color=color, linestyle="")  # "ro"  # pyright: ignore[reportUnknownMemberType]
+        # "ro"
+        dots, = self.axes.plot(  # pyright: ignore[reportUnknownMemberType]
+            x_values, y_values, marker='o', color=color, linestyle="")
         self.geometrias.append(dots)
 
         # desenha texto se requisitado
@@ -116,7 +126,9 @@ class Interface:
             self.annotation(points)
 
     def draw_lines(self, lines: Linha, text: bool = False) -> None:
-        """Exibe linhas na tela da interface gráfica."""
+        """
+        Exibe linhas na tela da interface gráfica.
+        """
         points = lines["lines"]
         color = x3d.get_colors(lines["appearance"])["emissiveColor"]
 
@@ -133,7 +145,9 @@ class Interface:
             self.annotation(points)
 
     def draw_circles(self, circles: Circulo, text: bool = False) -> None:
-        """Exibe contornos de círculos na tela da interface gráfica."""
+        """
+        Exibe contornos de círculos na tela da interface gráfica.
+        """
         radius = circles["radius"]
         color = x3d.get_colors(circles["appearance"])["emissiveColor"]
 
@@ -151,7 +165,9 @@ class Interface:
             self.annotation([[0,0]]) # Centro sempre no (0,0)
 
     def draw_triangle(self, triangles: Poligono, text: bool = False) -> None:
-        """Exibe triângulos na tela da interface gráfica."""
+        """
+        Exibe triângulos na tela da interface gráfica.
+        """
         points = triangles["vertices"]
         color = x3d.get_colors(triangles["appearance"])["emissiveColor"]
 
@@ -172,7 +188,9 @@ class Interface:
                 self.annotation(points)
 
     def exibe_geometrias_grid(self, label: str | None) -> None:
-        """Exibe e esconde as geometrias/grid sobre a tela da interface gráfica."""
+        """
+        Exibe e esconde as geometrias/grid sobre a tela da interface gráfica.
+        """
         if label == 'Geometria':
             for geometria in self.geometrias:
                 geometria.set_visible(not geometria.get_visible())
@@ -185,17 +203,23 @@ class Interface:
             self.fig.canvas.flush_events()
 
     def set_saver(self, image_saver: Callable[[], None]) -> None:
-        """Define função para salvar imagens."""
+        """
+        Define função para salvar imagens.
+        """
         self.image_saver = image_saver
 
     def save_image(self, _event: Event) -> None:
-        """Salva imagens."""
+        """
+        Salva imagens.
+        """
         if self.image_saver:
             print("Salvando imagem")
             self.image_saver()
 
     def preview(self, pause: bool, func: Callable[[], npt.NDArray[np.uint8]]) -> None:
-        """Realização a visualização na tela da interface gráfica."""
+        """
+        Realização a visualização na tela da interface gráfica.
+        """
         extent = (0, self.width, self.height, 0)
 
         # Coleta o tempo antes da renderização
