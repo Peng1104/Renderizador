@@ -39,10 +39,11 @@ class Renderizador:
         self.image_file: str = "tela.png"
         self.scene: x3d.X3D | None = None
         self.framebuffers: dict[str, int] = {}
-        # Fator de supersampling (SSAA): desenha internamente em resolução
+        # Fator de supersampling (SSAA) opcional, além do 4x MSAA feito pela
+        # GL (GL.MSAA_AMOSTRAS): desenha internamente em resolução
         # width*fator x height*fator e reduz por média de blocos em pos(),
-        # suavizando as bordas "em escada" dos triângulos.
-        self.supersampling: int = 2
+        # suavizando ainda mais. Se 1 só o MSAA da GL atua.
+        self.supersampling: int = 1
         self.render_width: int = self.width
         self.render_height: int = self.height
 
@@ -123,8 +124,8 @@ class Renderizador:
         """
         # Função invocada antes do processo de renderização iniciar.
 
-        # Limpa o frame buffers atual
-        gpu.GPU.clear_buffer()
+        # Limpa o FrameBuffer do GPU e o buffer de multisample (4x MSAA) da GL
+        gl.GL.clear()
 
         # Recursos que podem ser úteis:
         # Define o valor do pixel no framebuffer: draw_pixel(coord, mode, data)
@@ -139,6 +140,14 @@ class Renderizador:
         # Essa é uma chamada conveniente para manipulação de buffers
         # ao final da renderização de um frame. Como por exemplo, executar
         # downscaling da imagem.
+
+        # Resolve o MSAA da GL: faz a média das subamostras de cada pixel
+        # e escreve o resultado no FrameBuffer FRONT (a resolução em que a GL
+        # desenhou). Precisa acontecer antes do box filter de supersampling
+        # abaixo, que ainda reduz FRONT (width*fator x height*fator) para
+        # SCREEN (resolução final), com fator=1 esse passo é um no-op, já que
+        # MSAA sozinho já resolveu tudo em resolução final.
+        gl.GL.resolve_multisample()
 
         # Reduz o FrameBuffer supersampled (FRONT) para a resolução final
         # (SCREEN) fazendo a média de cada bloco fator x fator (box filter),

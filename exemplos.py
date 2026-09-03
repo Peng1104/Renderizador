@@ -15,13 +15,15 @@ import signal
 import subprocess
 import sys
 import time
+from types import FrameType
+from typing import Any
 
 DIR = "docs/exemplos/"
 
 # List para controlar subprocesses
-subprocesses = []
+subprocesses: list[subprocess.Popen[bytes]] = []
 
-def signal_handler(sig, frame):
+def signal_handler(sig: int, frame: FrameType | None) -> None:
     """
     Encerra os subprocessos abertos ao receber SIGINT.
     """
@@ -33,20 +35,20 @@ def signal_handler(sig, frame):
 # Registrando sinal para SIGINT
 signal.signal(signal.SIGINT, signal_handler)
 
-TESTE = []
+TESTE: list[list[str]] = []
 
 # Load the JSON data
 with open('docs/exemplos.json', 'r') as f:
-    data = json.load(f)
+    data: dict[str, Any] = json.load(f)
 
 # Populate the TESTE list based on the JSON data
 for section in data['examples']:
     for example in section['examples']:
-        path = example['path']
-        x3d = example['x3d']
+        path: str = example['path']
+        x3d: str = example['x3d']
         w = str(example.get('width', 640))
         h = str(example.get('height', 480))
-        p = example.get('pause', False)
+        p: bool = example.get('pause', False)
         args = [x3d, "-i", os.path.join(DIR, path, f"{x3d}/{x3d}.x3d"), "-w", w, "-h", h]
         TESTE.append(args + (["-p"] if p else []))
 
@@ -54,6 +56,7 @@ for section in data['examples']:
 # Lista os exemplos registrados (em 3 colunas)
 colunas = 4
 t = -(len(TESTE)//-colunas)
+
 for i in range(t):
     for j in range(colunas):
         d = i+j*t
@@ -62,14 +65,16 @@ for i in range(t):
     print()
 
 # Se um parâmetro fornecido, usar ele como escolha do exemplo
-outra_opcoes = []  # caso usuario passe opções que deverão ser repassadas, por exemplo: --quiet
+outras_opcoes: list[str] = []  # opções que deverão ser repassadas, por exemplo: --quiet
+
 if len(sys.argv) > 1:
     escolhas = sys.argv[1:]
 else:
     escolhas = [input("Escolha o exemplo: ")]
 
 # Verifica se a escolha do exemplo foi por faixa, índice ou argumento da lista
-opcoes = []
+opcoes: list[list[str]] = []
+
 for escolha in escolhas:
     if ".." in escolha:
         try:
@@ -81,7 +86,7 @@ for escolha in escolhas:
     elif escolha.isnumeric():
         numero = int(escolha)
         if 0 <= numero < len(TESTE):
-            opcoes.append(TESTE[int(escolha)])
+            opcoes.append(TESTE[numero])
         else:
             sys.exit("Opção inválida!")
     else:

@@ -26,10 +26,15 @@ from matplotlib.ticker import MultipleLocator
 from matplotlib.widgets import Button, CheckButtons, TextBox
 from x3d import Circulo, Linha, Poligono, Ponto
 
+
 # matplotlib 3.11.1 wraps TextBox._resize with a decorator meant for mouse
 # events, which reads event.inaxes; ResizeEvent has no such attribute, so
 # every window resize raises AttributeError. Restore the undecorated version.
-TextBox._resize = lambda self, event: self.stop_typing()  # pyright: ignore[reportAttributeAccessIssue]
+def _resize_workaround(self: TextBox, event: object) -> None:
+    """Substitui TextBox._resize (ver comentário acima)."""
+    self.stop_typing()  # pyright: ignore[reportUnknownMemberType]
+
+TextBox._resize = _resize_workaround  # pyright: ignore[reportAttributeAccessIssue]
 
 
 class Interface:

@@ -4,3 +4,4 @@ __pycache__/
 *.png
 .venv/
 .ruff_cache/
+.claude/
