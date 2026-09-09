@@ -578,7 +578,8 @@ class GL:
         GL.ms_buffer[ys_pixel[ys_idx], xs_pixel[xs_idx], sy_idx, sx_idx] = cor
 
     @staticmethod
-    def _triangle_coverage(x0: float, y0: float, x1: float, y1: float, x2: float, y2: float
+    def _triangle_coverage(x0: float, y0: float, x1: float, y1: float, x2: float, y2: float,
+                           w0: float, w1: float, w2: float
                            ) -> tuple[npt.NDArray[np.int64], npt.NDArray[np.int64],
                                       npt.NDArray[np.int64], npt.NDArray[np.int64],
                                       npt.NDArray[np.float64]] | None:
@@ -592,10 +593,25 @@ class GL:
         que precisam de um valor por subamostra em vez de uma cor única por
         triângulo.
 
+        O peso baricêntrico bruto (calculado em coordenadas de tela, já
+        projetadas) interpola atributos linearmente na tela, o que é
+        incorreto sob perspectiva: dois vértices à mesma distância em tela
+        podem estar a profundidades bem diferentes na câmera. Por isso o
+        peso é corrigido pela perspectiva com `w0`, `w1`, `w2` (o
+        componente w do espaço de clip de cada vértice, devolvido por
+        `GL._project_points`, proporcional à profundidade na câmera) antes
+        de ser devolvido: cada peso bruto é dividido pelo w do seu vértice
+        e o resultado renormalizado para somar 1, que é a forma padrão de
+        interpolação perspectiva-correta a partir de coordenadas já
+        projetadas.
+
         Parameters
         ----------
         x0, y0, x1, y1, x2, y2 : float
             Coordenadas de tela dos 3 vértices do triângulo.
+        w0, w1, w2 : float
+            Componente w do espaço de clip de cada vértice (nessa ordem),
+            devolvido por `GL._project_points`.
 
         Returns
         -------
@@ -604,7 +620,8 @@ class GL:
             `(ys, xs, sy, sx, pesos)`: os 4 primeiros são índices em
             `GL.ms_buffer` (linha, coluna, subamostra y, subamostra x) das K
             subamostras cobertas; `pesos` é um array (3, K) com o peso
-            baricêntrico de v0, v1 e v2 (nessa ordem) em cada subamostra.
+            baricêntrico, já corrigido pela perspectiva, de v0, v1 e v2
+            (nessa ordem) em cada subamostra.
         """
         min_x = max(0, math.floor(min(x0, x1, x2)))
         max_x = min(GL.width - 1, math.ceil(max(x0, x1, x2)))
@@ -662,19 +679,34 @@ class GL:
             baricentro_sel[0] / total,  # peso de v2 (vem de edge0)
         ])
 
-        return ys_pixel[ys_idx], xs_pixel[xs_idx], sy_idx, sx_idx, pesos
+        # Correção de perspectiva: divide cada peso pelo w do respectivo
+        # vértice e renormaliza para voltar a somar 1.
+        pesos_persp = pesos / np.array([w0, w1, w2])[:, None]
+        pesos_persp /= pesos_persp.sum(axis=0)
+
+        return ys_pixel[ys_idx], xs_pixel[xs_idx], sy_idx, sx_idx, pesos_persp
 
     @staticmethod
-    def _scan_triangle_color(x0: float, y0: float, cor0: npt.NDArray[np.float64],
-                             x1: float, y1: float, cor1: npt.NDArray[np.float64],
-                             x2: float, y2: float, cor2: npt.NDArray[np.float64]) -> None:
+    def _scan_triangle_color(x0: float, y0: float, w0: float, cor0: npt.NDArray[np.float64],
+                             x1: float, y1: float, w1: float, cor1: npt.NDArray[np.float64],
+                             x2: float, y2: float, w2: float, cor2: npt.NDArray[np.float64]
+                             ) -> None:
         """
         Varre um triângulo 2D com cor interpolada por vértice (Gouraud shading).
+
+        A interpolação é corrigida pela perspectiva (ver `GL._triangle_coverage`):
+        sem essa correção, um vértice muito mais distante que os outros dois
+        puxaria a cor para perto de si numa fração maior da área em tela do
+        que deveria, porque a área em tela por si só não reflete a
+        profundidade real do ponto na câmera.
 
         Parameters
         ----------
         x0, y0, x1, y1, x2, y2 : float
             Coordenadas de tela dos 3 vértices do triângulo.
+        w0, w1, w2 : float
+            Componente w do espaço de clip de cada vértice (nessa ordem),
+            devolvido por `GL._project_points`.
         cor0, cor1, cor2 : NDArray[float64]
             Cor de cada vértice (na mesma ordem), no formato X3D [r, g, b]
             com cada canal em [0, 1].
@@ -684,7 +716,7 @@ class GL:
         None
             Escreve em GL.ms_buffer; não há retorno.
         """
-        cobertura = GL._triangle_coverage(x0, y0, x1, y1, x2, y2)
+        cobertura = GL._triangle_coverage(x0, y0, x1, y1, x2, y2, w0, w1, w2)
 
         if cobertura is None:
             return
@@ -698,21 +730,26 @@ class GL:
         GL.ms_buffer[ys, xs, sy, sx] = cor_rgb8
 
     @staticmethod
-    def _scan_triangle_textured(x0: float, y0: float, uv0: npt.NDArray[np.float64],
-                                x1: float, y1: float, uv1: npt.NDArray[np.float64],
-                                x2: float, y2: float, uv2: npt.NDArray[np.float64],
+    def _scan_triangle_textured(x0: float, y0: float, w0: float, uv0: npt.NDArray[np.float64],
+                                x1: float, y1: float, w1: float, uv1: npt.NDArray[np.float64],
+                                x2: float, y2: float, w2: float, uv2: npt.NDArray[np.float64],
                                 textura: npt.NDArray[np.uint8]) -> None:
         """
         Varre um triângulo 2D com uma textura mapeada por coordenadas UV por vértice.
 
         Amostragem nearest-neighbor (sem filtragem bilinear), com wrap
         (repeat) das coordenadas UV fora de [0, 1], que é o padrão X3D
-        (`repeatS`/`repeatT` = TRUE).
+        (`repeatS`/`repeatT` = TRUE). A interpolação das coordenadas UV é
+        corrigida pela perspectiva (ver `GL._triangle_coverage`), senão a
+        textura distorce em superfícies inclinadas em relação à câmera.
 
         Parameters
         ----------
         x0, y0, x1, y1, x2, y2 : float
             Coordenadas de tela dos 3 vértices do triângulo.
+        w0, w1, w2 : float
+            Componente w do espaço de clip de cada vértice (nessa ordem),
+            devolvido por `GL._project_points`.
         uv0, uv1, uv2 : NDArray[float64]
             Coordenada de textura [u, v] de cada vértice (na mesma ordem).
         textura : NDArray[uint8]
@@ -724,7 +761,7 @@ class GL:
         None
             Escreve em GL.ms_buffer; não há retorno.
         """
-        cobertura = GL._triangle_coverage(x0, y0, x1, y1, x2, y2)
+        cobertura = GL._triangle_coverage(x0, y0, x1, y1, x2, y2, w0, w1, w2)
 
         if cobertura is None:
             return
@@ -849,7 +886,6 @@ class GL:
         -------
         None
             A função escreve no buffer de multisample da GL (GL.ms_buffer); o resultado
-            final só aparece após o resolve do frame (GL.resolve_multisample()); não há
             retorno.
         """
         cor = GL._to_rgb8(colors["emissiveColor"])
@@ -953,7 +989,8 @@ class GL:
 
     @staticmethod
     def _project_points(point: list[float]
-                        ) -> tuple[npt.NDArray[np.float64], npt.NDArray[np.float64]]:
+                        ) -> tuple[npt.NDArray[np.float64], npt.NDArray[np.float64],
+                                   npt.NDArray[np.float64]]:
         """
         Projeta uma lista de pontos 3D (objeto) para coordenadas de tela.
 
@@ -976,6 +1013,14 @@ class GL:
         NDArray[float64]
             Coordenadas y de cada ponto, em coordenadas de tela, mesmo
             tamanho do primeiro retorno.
+        NDArray[float64]
+            Componente w do espaço de clip de cada ponto (proporcional à
+            profundidade do ponto na câmera), mesmo tamanho dos dois
+            retornos anteriores. Usado para interpolação de atributos
+            (cor, textura) corrigida pela perspectiva, já que a
+            interpolação linear direta em coordenadas de tela distorce
+            qualquer atributo por vértice quando os vértices de um mesmo
+            triângulo têm profundidades bem diferentes.
         """
         # Matriz completa: objeto -> mundo -> câmera -> clip.
         transformacao = GL.perspective_matrix @ GL.view_matrix @ GL.transform_stack[-1]
@@ -991,7 +1036,7 @@ class GL:
         tela_x = (ndc[:, 0] + 1) / 2 * GL.width
         tela_y = (1 - ndc[:, 1]) / 2 * GL.height
 
-        return tela_x, tela_y
+        return tela_x, tela_y, clip[:, 3]
 
     @staticmethod
     def _front_facing_mask(tela_x: npt.NDArray[np.float64], tela_y: npt.NDArray[np.float64],
@@ -1058,7 +1103,7 @@ class GL:
             retorno.
         """
         cor = GL._to_rgb8(colors["emissiveColor"])
-        tela_x, tela_y = GL._project_points(point)
+        tela_x, tela_y, _ = GL._project_points(point)
 
         n_tri = len(tela_x) // 3
         i0 = np.arange(0, n_tri * 3, 3)
@@ -1252,7 +1297,7 @@ class GL:
             retorno.
         """
         cor = GL._to_rgb8(colors["emissiveColor"])
-        tela_x, tela_y = GL._project_points(point)
+        tela_x, tela_y, _ = GL._project_points(point)
 
         # Array contento a quantidade de vértices de cada tira
         counts = np.asarray(stripCount, dtype=np.int64)
@@ -1307,7 +1352,7 @@ class GL:
             retorno.
         """
         cor = GL._to_rgb8(colors["emissiveColor"])
-        tela_x, tela_y = GL._project_points(point)
+        tela_x, tela_y, _ = GL._project_points(point)
 
         idx = np.asarray(index, dtype=np.int64)
         # Divide em tiras nos pontos onde -1 aparece; cada segmento resultante,
@@ -1387,7 +1432,7 @@ class GL:
             A função escreve no buffer de multisample da GL (GL.ms_buffer); não há
             retorno.
         """
-        tela_x, tela_y = GL._project_points(coord)
+        tela_x, tela_y, tela_w = GL._project_points(coord)
 
         idxs = np.asarray(coordIndex, dtype=np.int64)
         i0, i1, i2, face_id = GL._fan_triangulate(idxs)
@@ -1402,7 +1447,7 @@ class GL:
         if i0.size == 0:
             return
 
-        xs, ys = tela_x.tolist(), tela_y.tolist()
+        xs, ys, ws = tela_x.tolist(), tela_y.tolist(), tela_w.tolist()
 
         # Textura: só se houver imagem e coordenada de textura, e a topologia de
         # texCoordIndex (ou o fallback coordIndex) bater com a de coordIndex:
@@ -1421,9 +1466,9 @@ class GL:
                 for a, b, c, v0, v1, v2 in zip(i0.tolist(), i1.tolist(), i2.tolist(),
                                                 uv0, uv1, uv2):
 
-                    GL._scan_triangle_textured(xs[a], ys[a], v0,
-                                               xs[b], ys[b], v1,
-                                               xs[c], ys[c], v2, textura)
+                    GL._scan_triangle_textured(xs[a], ys[a], ws[a], v0,
+                                               xs[b], ys[b], ws[b], v1,
+                                               xs[c], ys[c], ws[c], v2, textura)
                 return
 
         if color:
@@ -1440,9 +1485,9 @@ class GL:
                     for a, b, c, v0, v1, v2 in zip(i0.tolist(), i1.tolist(), i2.tolist(),
                                                     cor0, cor1, cor2):
 
-                        GL._scan_triangle_color(xs[a], ys[a], v0,
-                                                xs[b], ys[b], v1,
-                                                xs[c], ys[c], v2)
+                        GL._scan_triangle_color(xs[a], ys[a], ws[a], v0,
+                                                xs[b], ys[b], ws[b], v1,
+                                                xs[c], ys[c], ws[c], v2)
                     return
             else:
                 # Uma cor por face inteira: colorIndex (se houver) indexa por
