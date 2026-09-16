@@ -100,6 +100,19 @@ class GL:
     # para não reconstruir a pirâmide de níveis a cada face que usa a textura.
     _mipmap_cache: ClassVar[dict[str, list[npt.NDArray[np.uint8]]]] = {}
 
+    # Cache da triangulação em leque de IndexedFaceSet, por id() da lista de
+    # índices (coordIndex/colorIndex/texCoordIndex), para não retriangular a
+    # cada frame uma malha estática (ver GL._fan_triangulate_cached).
+    _fan_cache: ClassVar[dict[int, tuple[npt.NDArray[np.int64], npt.NDArray[np.int64],
+                                          npt.NDArray[np.int64], npt.NDArray[np.int64]]]] = {}
+
+    # Quantidade mínima de triângulos de um draw call a partir da qual vale a
+    # pena pré-calcular arestas/bbox em lote (GL._batch_edges_and_bbox): abaixo
+    # disso, o custo fixo de montar os arrays em lote (stack, roll, listas de
+    # retorno) supera a economia de não recalcular por triângulo, medido em
+    # bound500.x3d (500 draw calls de 1 triângulo cada, ver GL._prepare_edges_and_bbox).
+    _LOTE_MINIMO: ClassVar[int] = 8
+
     @staticmethod
     def setup(width: int, height: int, near: float = 0.01, far: float = 1000) -> None:
         """
@@ -647,8 +660,133 @@ class GL:
         GL.ms_buffer[ys, xs, sy, sx] = np.clip(GL._round(mistura), 0, 255).astype(np.uint8)
 
     @staticmethod
+    def _batch_edges_and_bbox(tela_x: npt.NDArray[np.float64], tela_y: npt.NDArray[np.float64],
+                              i0: npt.NDArray[np.int64], i1: npt.NDArray[np.int64],
+                              i2: npt.NDArray[np.int64]
+                              ) -> tuple[npt.NDArray[np.float64], npt.NDArray[np.int64],
+                                         npt.NDArray[np.int64], npt.NDArray[np.int64],
+                                         npt.NDArray[np.int64]]:
+        """
+        Pré-calcula os coeficientes de aresta e a bounding box de todos os T triângulos de uma vez.
+
+        `GL._triangle_coverage` precisa dos coeficientes de aresta e da
+        bounding box de cada triângulo antes de rasterizá-lo, mas essas
+        duas quantidades dependem só das coordenadas $(x, y)$ de tela dos
+        3 vértices, o mesmo cálculo repetido triângulo a triângulo dentro
+        do laço Python de varredura de uma malha. Calculá-las aqui, para
+        todos os T triângulos de uma vez via operações vetorizadas de
+        array, evita essa repetição: o laço por triângulo passa a só
+        indexar o resultado já pronto (ver documento de rasterização por
+        função de aresta para a derivação das fórmulas).
+
+        Parameters
+        ----------
+        tela_x, tela_y : NDArray[float64]
+            Coordenadas de tela de todos os vértices envolvidos, mesmo
+            tamanho (tipicamente o retorno de `GL._project_points`).
+        i0, i1, i2 : NDArray[int64]
+            Índices do primeiro, segundo e terceiro vértice de cada
+            triângulo, em `tela_x`/`tela_y`, mesmo tamanho T entre si.
+
+        Returns
+        -------
+        NDArray[float64]
+            `arestas`: coeficientes (dy, -dx, ay*dx - ax*dy) das 3 arestas
+            de cada triângulo, array (T, 3, 3), na mesma ordem usada por
+            `GL._triangle_coverage` (edge0 = v0->v1, edge1 = v1->v2,
+            edge2 = v2->v0).
+        NDArray[int64]
+            `min_x` de cada triângulo, já recortado a [0, largura - 1],
+            array (T,).
+        NDArray[int64]
+            `max_x` de cada triângulo, já recortado a [0, largura - 1].
+        NDArray[int64]
+            `min_y` de cada triângulo, já recortado a [0, altura - 1].
+        NDArray[int64]
+            `max_y` de cada triângulo, já recortado a [0, altura - 1].
+        """
+        x0, y0 = tela_x[i0], tela_y[i0]
+        x1, y1 = tela_x[i1], tela_y[i1]
+        x2, y2 = tela_x[i2], tela_y[i2]
+
+        ax = np.stack([x0, x1, x2], axis=1)  # (T, 3)
+        ay = np.stack([y0, y1, y2], axis=1)
+        bx = np.roll(ax, -1, axis=1)
+        by = np.roll(ay, -1, axis=1)
+        dx = bx - ax
+        dy = by - ay
+
+        arestas = np.stack([dy, -dx, ay * dx - ax * dy], axis=2)  # (T, 3, 3)
+
+        min_x = np.maximum(0, np.floor(np.minimum(np.minimum(x0, x1), x2))).astype(np.int64)
+        max_x = np.minimum(GL.width - 1,
+                           np.ceil(np.maximum(np.maximum(x0, x1), x2))).astype(np.int64)
+        min_y = np.maximum(0, np.floor(np.minimum(np.minimum(y0, y1), y2))).astype(np.int64)
+        max_y = np.minimum(GL.height - 1,
+                           np.ceil(np.maximum(np.maximum(y0, y1), y2))).astype(np.int64)
+
+        return arestas, min_x, max_x, min_y, max_y
+
+    @staticmethod
+    def _prepare_edges_and_bbox(tela_x: npt.NDArray[np.float64], tela_y: npt.NDArray[np.float64],
+                                i0: npt.NDArray[np.int64], i1: npt.NDArray[np.int64],
+                                i2: npt.NDArray[np.int64]
+                                ) -> tuple[list[npt.NDArray[np.float64] | None],
+                                           list[tuple[int, int, int, int] | None]]:
+        """
+        Decide se compensa pré-calcular arestas/bbox em lote para um draw call.
+
+        `GL._batch_edges_and_bbox` tem um custo fixo por chamada (montar os
+        arrays `(T, 3)`/`(T, 3, 3)`, fazer os `roll`, converter os arrays de
+        bbox para listas Python) que só compensa quando amortizado sobre
+        vários triângulos: para um draw call com poucos triângulos (ex: um
+        `TriangleSet` de um triângulo só, comum em cenas com muitos objetos
+        pequenos separados), esse custo fixo é maior que simplesmente deixar
+        `GL._triangle_coverage` calcular a aresta/bbox daquele único
+        triângulo inline, como fazia antes da vetorização em lote existir.
+        Por isso, abaixo de `GL._LOTE_MINIMO` triângulos, devolve listas de
+        `None`: `GL._triangle_coverage` recebe `None` em `arestas`/`bbox` e
+        calcula os dois na hora, por triângulo, sem o overhead da
+        vetorização em lote.
+
+        Parameters
+        ----------
+        tela_x, tela_y : NDArray[float64]
+            Coordenadas de tela de todos os vértices envolvidos, mesmo
+            tamanho (tipicamente o retorno de `GL._project_points`).
+        i0, i1, i2 : NDArray[int64]
+            Índices do primeiro, segundo e terceiro vértice de cada
+            triângulo, em `tela_x`/`tela_y`, mesmo tamanho T entre si.
+
+        Returns
+        -------
+        list[NDArray[float64] | None]
+            `arestas_l`: um item por triângulo (mesma ordem de
+            `i0`/`i1`/`i2`); cada item é o array (3, 3) de coeficientes de
+            aresta daquele triângulo, ou `None` se o lote foi pequeno
+            demais para compensar o pré-cálculo em lote.
+        list[tuple[int, int, int, int] | None]
+            `bboxes`: um item por triângulo, cada um a bounding box
+            `(min_x, max_x, min_y, max_y)` daquele triângulo, ou `None`
+            pelo mesmo motivo de `arestas_l` (sempre `None` junto com o
+            `arestas_l` correspondente, nunca só um dos dois).
+        """
+        t = int(i0.size)
+
+        if t < GL._LOTE_MINIMO:
+            return [None] * t, [None] * t
+
+        arestas_t, min_x, max_x, min_y, max_y = GL._batch_edges_and_bbox(tela_x, tela_y, i0, i1, i2)
+        arestas_l: list[npt.NDArray[np.float64] | None] = list(arestas_t)
+        bboxes: list[tuple[int, int, int, int] | None] = list(
+            zip(min_x.tolist(), max_x.tolist(), min_y.tolist(), max_y.tolist()))
+
+        return arestas_l, bboxes
+
+    @staticmethod
     def _scan_triangle_depth(v0: VerticeProjetado, v1: VerticeProjetado,
-                             v2: VerticeProjetado, cor: npt.NDArray[np.int64],
+                             v2: VerticeProjetado, arestas: npt.NDArray[np.float64] | None,
+                             bbox: tuple[int, int, int, int] | None, cor: npt.NDArray[np.int64],
                              alpha: float = 1.0) -> None:
         """
         Varre um triângulo 3D com preenchimento flat, testando o z-buffer.
@@ -673,6 +811,14 @@ class GL:
             (x, y, w, z) em coordenadas de tela, com w o componente w do
             espaço de clip e z o componente z de NDC, ambos devolvidos por
             `GL._project_points`.
+        arestas : NDArray[float64] or None
+            Coeficientes de aresta do triângulo, array (3, 3), devolvido
+            por `GL._batch_edges_and_bbox`, ou None (ver
+            `GL._prepare_edges_and_bbox`).
+        bbox : tuple[int, int, int, int] or None
+            Bounding box do triângulo em pixels de tela: (min_x, max_x,
+            min_y, max_y), devolvida por `GL._batch_edges_and_bbox`, ou
+            None junto com arestas=None.
         cor : NDArray[int64]
             Cor RGB (0-255) de preenchimento do triângulo.
         alpha : float, optional
@@ -684,7 +830,8 @@ class GL:
         None
             Escreve em GL.ms_buffer; não há retorno.
         """
-        cobertura = GL._triangle_coverage(v0, v1, v2, escreve_profundidade=alpha >= 1.0)
+        cobertura = GL._triangle_coverage(v0, v1, v2, arestas, bbox,
+                                          escreve_profundidade=alpha >= 1.0)
 
         if cobertura is None:
             return
@@ -694,6 +841,8 @@ class GL:
 
     @staticmethod
     def _triangle_coverage(v0: VerticeProjetado, v1: VerticeProjetado, v2: VerticeProjetado,
+                           arestas: npt.NDArray[np.float64] | None,
+                           bbox: tuple[int, int, int, int] | None,
                            escreve_profundidade: bool = True
                            ) -> tuple[npt.NDArray[np.int64], npt.NDArray[np.int64],
                                       npt.NDArray[np.int64], npt.NDArray[np.int64],
@@ -707,6 +856,19 @@ class GL:
         preenchimento não é flat (cor interpolada por vértice ou textura),
         que precisam de um valor por subamostra em vez de uma cor única por
         triângulo.
+
+        Os coeficientes de função de aresta e a bounding box (`arestas`,
+        `bbox`) normalmente já vêm prontos, em vez de recalculados aqui a
+        partir de `v0`, `v1`, `v2`: como as duas quantidades dependem só das
+        coordenadas $(x, y)$ de tela dos 3 vértices, elas são calculadas de
+        uma vez para todos os triângulos de um draw call (ver
+        `GL._batch_edges_and_bbox`), vetorizado em vez de recomputado a cada
+        chamada desta função dentro do laço por triângulo (ver documento de
+        rasterização por função de aresta). Para draw calls pequenos, onde
+        esse pré-cálculo em lote não compensa (ver
+        `GL._prepare_edges_and_bbox`), `arestas`/`bbox` chegam como `None` e
+        são calculados aqui mesmo, por triângulo, como antes da vetorização
+        em lote existir.
 
         O peso baricêntrico bruto (calculado em coordenadas de tela, já
         projetadas) interpola atributos linearmente na tela, o que é
@@ -736,6 +898,15 @@ class GL:
             (x, y, w, z) em coordenadas de tela, com w o componente w do
             espaço de clip e z o componente z de NDC, ambos devolvidos por
             `GL._project_points`.
+        arestas : NDArray[float64] or None
+            Coeficientes (dy, -dx, ay*dx - ax*dy) das 3 arestas do
+            triângulo, array (3, 3), devolvido por
+            `GL._batch_edges_and_bbox` para o triângulo em questão, ou
+            `None` para calcular na hora (ver `GL._prepare_edges_and_bbox`).
+        bbox : tuple[int, int, int, int] or None
+            Bounding box do triângulo em pixels de tela, já recortada aos
+            limites da tela: (min_x, max_x, min_y, max_y); ou `None` para
+            calcular na hora, sempre em conjunto com `arestas=None`.
         escreve_profundidade : bool, optional
             Se True (padrão), subamostras aprovadas no teste de z-buffer
             atualizam `GL.depth_buffer` com a nova profundidade. Geometria
@@ -756,26 +927,31 @@ class GL:
             pela perspectiva, de v0, v1 e v2 (nessa ordem) em cada
             subamostra.
         """
-        (x0, y0, w0, z0), (x1, y1, w1, z1), (x2, y2, w2, z2) = v0, v1, v2
+        x0, y0, w0, z0 = v0
+        x1, y1, w1, z1 = v1
+        x2, y2, w2, z2 = v2
 
-        min_x = max(0, math.floor(min(x0, x1, x2)))
-        max_x = min(GL.width - 1, math.ceil(max(x0, x1, x2)))
-        min_y = max(0, math.floor(min(y0, y1, y2)))
-        max_y = min(GL.height - 1, math.ceil(max(y0, y1, y2)))
+        if bbox is None:
+            min_x = max(0, math.floor(min(x0, x1, x2)))
+            max_x = min(GL.width - 1, math.ceil(max(x0, x1, x2)))
+            min_y = max(0, math.floor(min(y0, y1, y2)))
+            max_y = min(GL.height - 1, math.ceil(max(y0, y1, y2)))
+        else:
+            min_x, max_x, min_y, max_y = bbox
 
         if min_x > max_x or min_y > max_y:
             return None
 
-        verts = np.array([[x0, y0], [x1, y1], [x2, y2]], dtype=np.float64)
-        a = verts
-        b = np.roll(verts, -1, axis=0)
-        d = b - a
-
-        arestas = np.column_stack([
-            d[:,  1],
-            -d[:, 0],
-            a[:,  1] * d[:, 0] - a[:, 0] * d[:, 1],
-        ])
+        if arestas is None:
+            verts = np.array([[x0, y0], [x1, y1], [x2, y2]], dtype=np.float64)
+            a = verts
+            b = np.roll(verts, -1, axis=0)
+            d = b - a
+            arestas = np.column_stack([
+                d[:,  1],
+                -d[:, 0],
+                a[:,  1] * d[:, 0] - a[:, 0] * d[:, 1],
+            ])
 
         m = GL.MSAA_AMOSTRAS
         desloc = (np.arange(m) + 0.5) / m
@@ -845,6 +1021,8 @@ class GL:
     def _scan_triangle_color(v0: VerticeProjetado, cor0: npt.NDArray[np.float64],
                              v1: VerticeProjetado, cor1: npt.NDArray[np.float64],
                              v2: VerticeProjetado, cor2: npt.NDArray[np.float64],
+                             arestas: npt.NDArray[np.float64] | None,
+                             bbox: tuple[int, int, int, int] | None,
                              alpha: float = 1.0
                              ) -> None:
         """
@@ -869,6 +1047,13 @@ class GL:
         cor0, cor1, cor2 : NDArray[float64]
             Cor de cada vértice (na mesma ordem), no formato X3D [r, g, b]
             com cada canal em [0, 1].
+        arestas : NDArray[float64] or None
+            Coeficientes de aresta do triângulo, array (3, 3), devolvido
+            por `GL._batch_edges_and_bbox`, ou None (ver
+            `GL._prepare_edges_and_bbox`).
+        bbox : tuple[int, int, int, int] or None
+            Bounding box do triângulo em pixels de tela, devolvida por
+            `GL._batch_edges_and_bbox`, ou None junto com arestas=None.
         alpha : float, optional
             Opacidade da geometria em [0, 1] (`1 - transparency` do
             Material X3D), por padrão 1.0 (opaco).
@@ -878,7 +1063,8 @@ class GL:
         None
             Escreve em GL.ms_buffer; não há retorno.
         """
-        cobertura = GL._triangle_coverage(v0, v1, v2, escreve_profundidade=alpha >= 1.0)
+        cobertura = GL._triangle_coverage(v0, v1, v2, arestas, bbox,
+                                          escreve_profundidade=alpha >= 1.0)
 
         if cobertura is None:
             return
@@ -956,6 +1142,8 @@ class GL:
                                 v1: VerticeProjetado, uv1: npt.NDArray[np.float64],
                                 v2: VerticeProjetado, uv2: npt.NDArray[np.float64],
                                 mipmaps: list[npt.NDArray[np.uint8]],
+                                arestas: npt.NDArray[np.float64] | None,
+                                bbox: tuple[int, int, int, int] | None,
                                 alpha: float = 1.0) -> None:
         """
         Varre um triângulo 2D com uma textura mapeada por coordenadas UV por vértice.
@@ -984,6 +1172,13 @@ class GL:
             Cadeia de mipmaps da textura, do nível 0 (original) ao 1x1,
             no formato devolvido por `GL._get_texture_mipmaps` (cada nível
             com eixos [u][v], como `gpu.GPU.load_texture`).
+        arestas : NDArray[float64] or None
+            Coeficientes de aresta do triângulo, array (3, 3), devolvido
+            por `GL._batch_edges_and_bbox`, ou None (ver
+            `GL._prepare_edges_and_bbox`).
+        bbox : tuple[int, int, int, int] or None
+            Bounding box do triângulo em pixels de tela, devolvida por
+            `GL._batch_edges_and_bbox`, ou None junto com arestas=None.
         alpha : float, optional
             Opacidade da geometria em [0, 1] (`1 - transparency` do
             Material X3D), por padrão 1.0 (opaco).
@@ -993,7 +1188,8 @@ class GL:
         None
             Escreve em GL.ms_buffer; não há retorno.
         """
-        cobertura = GL._triangle_coverage(v0, v1, v2, escreve_profundidade=alpha >= 1.0)
+        cobertura = GL._triangle_coverage(v0, v1, v2, arestas, bbox,
+                                          escreve_profundidade=alpha >= 1.0)
 
         if cobertura is None:
             return
@@ -1183,6 +1379,48 @@ class GL:
 
         return (np.concatenate(i0_partes), np.concatenate(i1_partes),
                 np.concatenate(i2_partes), np.concatenate(face_partes))
+
+    @staticmethod
+    def _fan_triangulate_cached(idxs: list[int]
+                                ) -> tuple[npt.NDArray[np.int64], npt.NDArray[np.int64],
+                                           npt.NDArray[np.int64], npt.NDArray[np.int64]]:
+        """
+        Versão cacheada de `GL._fan_triangulate`, por identidade da lista de índices.
+
+        Um nó de geometria é parseado uma única vez do XML na carga da
+        cena; suas listas de índices (`coordIndex`, `colorIndex`,
+        `texCoordIndex`) são os mesmos objetos de lista reusados a cada
+        frame renderizado, para malhas estáticas (nada no grafo de cena
+        substitui essas listas depois do parse). Cachear o resultado da
+        triangulação em leque por `id()` da lista evita repetir esse
+        trabalho a cada frame para uma malha que não muda: o ganho cresce
+        com o número de vértices da malha e o número de frames
+        renderizados, o caso comum de uma cena parada ou com só a câmera
+        se movendo.
+
+        A chave usada é a identidade do objeto Python (`id()`), não o seu
+        conteúdo: é seguro aqui porque os nós do grafo de cena, e portanto
+        suas listas de índice, permanecem vivos durante toda a sessão de
+        renderização (nunca são descartados nem substituídos por outro
+        objeto), então o mesmo `id()` nunca passa a apontar para uma lista
+        de conteúdo diferente entre uma chamada e outra.
+
+        Parameters
+        ----------
+        idxs : list[int]
+            Índices concatenados de várias faces, com -1 separando cada
+            uma (mesmo formato de `GL._fan_triangulate`).
+
+        Returns
+        -------
+        Mesmo retorno de `GL._fan_triangulate`.
+        """
+        chave = id(idxs)
+
+        if chave not in GL._fan_cache:
+            GL._fan_cache[chave] = GL._fan_triangulate(np.asarray(idxs, dtype=np.int64))
+
+        return GL._fan_cache[chave]
 
     @staticmethod
     def polypoint2D(point: list[float], colors: Colors) -> None:
@@ -1442,8 +1680,12 @@ class GL:
         idx0: list[int] = i0.tolist()
         idx1: list[int] = i1.tolist()
         idx2: list[int] = i2.tolist()
-        for a, b, c in zip(idx0, idx1, idx2):
-            GL._scan_triangle_depth(verts[a], verts[b], verts[c], cor, alpha)
+
+        arestas_l, bboxes = GL._prepare_edges_and_bbox(tela_x, tela_y, i0, i1, i2)
+
+        for t, (a, b, c) in enumerate(zip(idx0, idx1, idx2)):
+            GL._scan_triangle_depth(verts[a], verts[b], verts[c],
+                                    arestas_l[t], bboxes[t], cor, alpha)
 
     @staticmethod
     def viewpoint(position: list[float], orientation: list[float], fieldOfView: float) -> None:
@@ -1649,8 +1891,12 @@ class GL:
         idx0: list[int] = i0.tolist()
         idx1: list[int] = i1.tolist()
         idx2: list[int] = i2.tolist()
-        for a, b, c in zip(idx0, idx1, idx2):
-            GL._scan_triangle_depth(verts[a], verts[b], verts[c], cor, alpha)
+
+        arestas_l, bboxes = GL._prepare_edges_and_bbox(tela_x, tela_y, i0, i1, i2)
+
+        for t, (a, b, c) in enumerate(zip(idx0, idx1, idx2)):
+            GL._scan_triangle_depth(verts[a], verts[b], verts[c],
+                                    arestas_l[t], bboxes[t], cor, alpha)
 
     @staticmethod
     def indexedTriangleStripSet(point: list[float], index: list[int], colors: Colors) -> None:
@@ -1702,12 +1948,18 @@ class GL:
         idx0: list[int] = i0.tolist()
         idx1: list[int] = i1.tolist()
         idx2: list[int] = i2.tolist()
-        for a, b, c in zip(idx0, idx1, idx2):
-            GL._scan_triangle_depth(verts[a], verts[b], verts[c], cor, alpha)
+
+        arestas_l, bboxes = GL._prepare_edges_and_bbox(tela_x, tela_y, i0, i1, i2)
+
+        for t, (a, b, c) in enumerate(zip(idx0, idx1, idx2)):
+            GL._scan_triangle_depth(verts[a], verts[b], verts[c],
+                                    arestas_l[t], bboxes[t], cor, alpha)
 
     @staticmethod
     def _fill_face_set_textured(idx0: list[int], idx1: list[int], idx2: list[int],
                                 verts: list[VerticeProjetado], frente: npt.NDArray[np.bool_],
+                                arestas_l: list[npt.NDArray[np.float64] | None],
+                                bboxes: list[tuple[int, int, int, int] | None],
                                 texCoord: list[float], texCoordIndex: list[int],
                                 coordIndex: list[int], current_texture: list[str],
                                 alpha: float) -> bool:
@@ -1731,6 +1983,10 @@ class GL:
             Máscara de back-face culling usada para os triângulos de
             `idx0`/`idx1`/`idx2`, para filtrar `texCoordIndex` na mesma
             topologia.
+        arestas_l, bboxes : list
+            Coeficientes de aresta e bounding box de cada triângulo de
+            `idx0`/`idx1`/`idx2` (mesma ordem e tamanho), devolvidos por
+            `GL._batch_edges_and_bbox` e já convertidos para lista.
         texCoord : list[float]
             Coordenadas de textura por vértice no formato [u0, v0, u1, v1, ...].
         texCoordIndex : list[int]
@@ -1758,8 +2014,8 @@ class GL:
         if mipmaps is None:
             return False
 
-        tidx = np.asarray(texCoordIndex if texCoordIndex else coordIndex, dtype=np.int64)
-        ti0, ti1, ti2, _ = GL._fan_triangulate(tidx)
+        tidx = texCoordIndex if texCoordIndex else coordIndex
+        ti0, ti1, ti2, _ = GL._fan_triangulate_cached(tidx)
 
         if ti0.size != frente.size:
             return False
@@ -1771,9 +2027,10 @@ class GL:
         # zip de 6 iteráveis cai no overload genérico Iterable[Any] do
         # typeshed (só tipa até 5); zipar índices e uv's em dois 3-tuplos
         # primeiro mantém os 3 zips dentro do limite tipado.
-        for (a, b, c), (uva, uvb, uvc) in zip(zip(idx0, idx1, idx2), zip(uv0, uv1, uv2)):
-            GL._scan_triangle_textured(verts[a], uva, verts[b], uvb,
-                                       verts[c], uvc, mipmaps, alpha)
+        for t, ((a, b, c), (uva, uvb, uvc)) in enumerate(zip(zip(idx0, idx1, idx2),
+                                                              zip(uv0, uv1, uv2))):
+            GL._scan_triangle_textured(verts[a], uva, verts[b], uvb, verts[c], uvc,
+                                       mipmaps, arestas_l[t], bboxes[t], alpha)
 
         return True
 
@@ -1782,6 +2039,8 @@ class GL:
                                         verts: list[VerticeProjetado],
                                         frente: npt.NDArray[np.bool_], color: list[float],
                                         colorIndex: list[int], coordIndex: list[int],
+                                        arestas_l: list[npt.NDArray[np.float64] | None],
+                                        bboxes: list[tuple[int, int, int, int] | None],
                                         alpha: float) -> bool:
         """
         Tenta preencher as faces de um IndexedFaceSet com cor por vértice (Gouraud).
@@ -1808,6 +2067,10 @@ class GL:
         coordIndex : list[int]
             Índices de vértice originais, usados como fallback de
             `colorIndex` quando este está vazio.
+        arestas_l, bboxes : list
+            Coeficientes de aresta e bounding box de cada triângulo de
+            `idx0`/`idx1`/`idx2` (mesma ordem e tamanho), devolvidos por
+            `GL._batch_edges_and_bbox` e já convertidos para lista.
         alpha : float
             Opacidade da geometria em [0, 1] (`1 - transparency`).
 
@@ -1819,8 +2082,7 @@ class GL:
             topologia não bate e o chamador deve tentar outro preenchimento.
         """
         cores = np.asarray(color, dtype=np.float64).reshape(-1, 3)
-        cidx = np.asarray(colorIndex if colorIndex else coordIndex, dtype=np.int64)
-        ci0, ci1, ci2, _ = GL._fan_triangulate(cidx)
+        ci0, ci1, ci2, _ = GL._fan_triangulate_cached(colorIndex if colorIndex else coordIndex)
 
         if ci0.size != frente.size:
             return False
@@ -1829,8 +2091,10 @@ class GL:
         cor0, cor1, cor2 = cores[ci0], cores[ci1], cores[ci2]
 
         # Mesmo motivo do zip duplo em GL._fill_face_set_textured.
-        for (a, b, c), (ca, cb, cc) in zip(zip(idx0, idx1, idx2), zip(cor0, cor1, cor2)):
-            GL._scan_triangle_color(verts[a], ca, verts[b], cb, verts[c], cc, alpha)
+        for t, ((a, b, c), (ca, cb, cc)) in enumerate(zip(zip(idx0, idx1, idx2),
+                                                           zip(cor0, cor1, cor2))):
+            GL._scan_triangle_color(verts[a], ca, verts[b], cb, verts[c], cc,
+                                    arestas_l[t], bboxes[t], alpha)
 
         return True
 
@@ -1838,7 +2102,10 @@ class GL:
     def _fill_face_set_color_per_face(idx0: list[int], idx1: list[int], idx2: list[int],
                                       verts: list[VerticeProjetado],
                                       face_id: npt.NDArray[np.int64], color: list[float],
-                                      colorIndex: list[int], alpha: float) -> None:
+                                      colorIndex: list[int],
+                                      arestas_l: list[npt.NDArray[np.float64] | None],
+                                      bboxes: list[tuple[int, int, int, int] | None],
+                                      alpha: float) -> None:
         """
         Preenche as faces de um IndexedFaceSet com uma cor sólida por face inteira.
 
@@ -1865,6 +2132,10 @@ class GL:
         colorIndex : list[int]
             Índices de cor (em `color`) por face, sem separadores -1; se
             vazio, a i-ésima face usa a i-ésima cor (a própria `face_id`).
+        arestas_l, bboxes : list
+            Coeficientes de aresta e bounding box de cada triângulo de
+            `idx0`/`idx1`/`idx2` (mesma ordem e tamanho), devolvidos por
+            `GL._batch_edges_and_bbox` e já convertidos para lista.
         alpha : float
             Opacidade da geometria em [0, 1] (`1 - transparency`).
 
@@ -1883,8 +2154,9 @@ class GL:
 
         cor_tri = GL._to_rgb8(cores[color_idx_por_tri])
 
-        for a, b, c, cor in zip(idx0, idx1, idx2, cor_tri):
-            GL._scan_triangle_depth(verts[a], verts[b], verts[c], cor, alpha)
+        for t, (a, b, c, cor) in enumerate(zip(idx0, idx1, idx2, cor_tri)):
+            GL._scan_triangle_depth(verts[a], verts[b], verts[c],
+                                    arestas_l[t], bboxes[t], cor, alpha)
 
     @staticmethod
     def indexedFaceSet(coord: list[float], coordIndex: list[int], colorPerVertex: bool,
@@ -1948,8 +2220,7 @@ class GL:
         """
         tela_x, tela_y, tela_w, tela_z = GL._project_points(coord)
 
-        idxs = np.asarray(coordIndex, dtype=np.int64)
-        i0, i1, i2, face_id = GL._fan_triangulate(idxs)
+        i0, i1, i2, face_id = GL._fan_triangulate_cached(coordIndex)
 
         if i0.size == 0:
             return
@@ -1968,13 +2239,15 @@ class GL:
         idx2: list[int] = i2.tolist()
         alpha = 1.0 - colors["transparency"]
 
+        arestas_l, bboxes = GL._prepare_edges_and_bbox(tela_x, tela_y, i0, i1, i2)
+
         # Prioridade de preenchimento (mutuamente exclusivas, como no X3D):
         # textura > cor por vértice/face > colors["emissiveColor"] flat.
         # Cada tentativa devolve False (e cai para a próxima prioridade) se
         # a topologia do índice correspondente não bater com a de
         # coordIndex, exigido pela spec X3D mas verificado aqui por
         # segurança.
-        if GL._fill_face_set_textured(idx0, idx1, idx2, verts, frente,
+        if GL._fill_face_set_textured(idx0, idx1, idx2, verts, frente, arestas_l, bboxes,
                                       texCoord, texCoordIndex, coordIndex,
                                       current_texture, alpha):
             return
@@ -1982,17 +2255,19 @@ class GL:
         if color:
             if colorPerVertex:
                 if GL._fill_face_set_color_per_vertex(idx0, idx1, idx2, verts, frente,
-                                                       color, colorIndex, coordIndex, alpha):
+                                                       color, colorIndex, coordIndex,
+                                                       arestas_l, bboxes, alpha):
                     return
             else:
                 GL._fill_face_set_color_per_face(idx0, idx1, idx2, verts, face_id,
-                                                 color, colorIndex, alpha)
+                                                 color, colorIndex, arestas_l, bboxes, alpha)
                 return
 
         cor = GL._to_rgb8(colors["emissiveColor"])
 
-        for a, b, c in zip(idx0, idx1, idx2):
-            GL._scan_triangle_depth(verts[a], verts[b], verts[c], cor, alpha)
+        for t, (a, b, c) in enumerate(zip(idx0, idx1, idx2)):
+            GL._scan_triangle_depth(verts[a], verts[b], verts[c],
+                                    arestas_l[t], bboxes[t], cor, alpha)
 
     @staticmethod
     def box(size: list[float], colors: Colors) -> None:
