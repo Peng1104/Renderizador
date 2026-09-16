@@ -501,7 +501,7 @@ class GL:
         gradiente = dy / dx if dx != 0 else 0.0
 
         eixo = np.arange(math.floor(x0), math.floor(x1) + 1)
-        y_exato = y0 + gradiente * (eixo - x0)
+        y_exato = y0 + (eixo - x0) * gradiente
 
         y_piso = np.floor(y_exato)
         frac = y_exato - y_piso
