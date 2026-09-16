@@ -607,8 +607,49 @@ class GL:
         GL.ms_buffer[ys_pixel[ys_idx], xs_pixel[xs_idx], sy_idx, sx_idx] = cor
 
     @staticmethod
+    def _blend_write(ys: npt.NDArray[np.int64], xs: npt.NDArray[np.int64],
+                     sy: npt.NDArray[np.int64], sx: npt.NDArray[np.int64],
+                     cor: npt.NDArray[np.float64] | npt.NDArray[np.int64] | npt.NDArray[np.uint8],
+                     alpha: float) -> None:
+        """
+        Escreve cor em GL.ms_buffer, misturando com o que já está lá se houver transparência.
+
+        Implementa alpha blending (`GL.ms_buffer` = `cor` * `alpha` +
+        `GL.ms_buffer` * `(1 - alpha)`) nas subamostras indicadas.
+        `alpha` vem de `1 - transparency` do Material X3D: `transparency` 0
+        é opaco (`alpha` 1) e 1 é totalmente transparente (`alpha` 0). Com
+        `alpha >= 1.0` (caso comum, geometria opaca) pula a mistura e
+        escreve `cor` direto, mesmo resultado sem o custo da conta.
+
+        Parameters
+        ----------
+        ys, xs, sy, sx : NDArray[int64]
+            Índices em `GL.ms_buffer` (linha, coluna, subamostra y,
+            subamostra x) das subamostras a escrever, mesmo tamanho.
+        cor : NDArray[float64], NDArray[int64] or NDArray[uint8]
+            Cor RGB (0-255) a escrever, um único vetor (3,) para
+            preenchimento flat, ou uma cor por subamostra (K, 3).
+        alpha : float
+            Opacidade em [0, 1] da geometria sendo desenhada.
+
+        Returns
+        -------
+        None
+            Escreve em GL.ms_buffer; não há retorno.
+        """
+        if alpha >= 1.0:
+            GL.ms_buffer[ys, xs, sy, sx] = cor
+            return
+
+        fundo = GL.ms_buffer[ys, xs, sy, sx].astype(np.float64)
+        frente = np.asarray(cor, dtype=np.float64)
+        mistura = frente * alpha + fundo * (1 - alpha)
+        GL.ms_buffer[ys, xs, sy, sx] = np.clip(GL._round(mistura), 0, 255).astype(np.uint8)
+
+    @staticmethod
     def _scan_triangle_depth(v0: VerticeProjetado, v1: VerticeProjetado,
-                             v2: VerticeProjetado, cor: npt.NDArray[np.int64]) -> None:
+                             v2: VerticeProjetado, cor: npt.NDArray[np.int64],
+                             alpha: float = 1.0) -> None:
         """
         Varre um triângulo 3D com preenchimento flat, testando o z-buffer.
 
@@ -619,7 +660,11 @@ class GL:
         triângulos de objetos diferentes que se cruzam no espaço (sem
         z-buffer, a oclusão dependeria só da ordem de desenho no grafo de
         cena, painter's algorithm implícito e incorreto para geometria que
-        se cruza).
+        se cruza). `alpha` < 1 mistura a cor com o que já está no buffer em
+        vez de sobrescrever (ver `GL._blend_write`), e não atualiza o
+        z-buffer (ver `GL._triangle_coverage`), para que geometria
+        transparente não esconda o que está atrás dela de outra geometria
+        transparente desenhada depois.
 
         Parameters
         ----------
@@ -630,22 +675,26 @@ class GL:
             `GL._project_points`.
         cor : NDArray[int64]
             Cor RGB (0-255) de preenchimento do triângulo.
+        alpha : float, optional
+            Opacidade da geometria em [0, 1] (`1 - transparency` do
+            Material X3D), por padrão 1.0 (opaco).
 
         Returns
         -------
         None
             Escreve em GL.ms_buffer; não há retorno.
         """
-        cobertura = GL._triangle_coverage(v0, v1, v2)
+        cobertura = GL._triangle_coverage(v0, v1, v2, escreve_profundidade=alpha >= 1.0)
 
         if cobertura is None:
             return
 
         ys, xs, sy, sx, _ = cobertura
-        GL.ms_buffer[ys, xs, sy, sx] = cor
+        GL._blend_write(ys, xs, sy, sx, cor, alpha)
 
     @staticmethod
-    def _triangle_coverage(v0: VerticeProjetado, v1: VerticeProjetado, v2: VerticeProjetado
+    def _triangle_coverage(v0: VerticeProjetado, v1: VerticeProjetado, v2: VerticeProjetado,
+                           escreve_profundidade: bool = True
                            ) -> tuple[npt.NDArray[np.int64], npt.NDArray[np.int64],
                                       npt.NDArray[np.int64], npt.NDArray[np.int64],
                                       npt.NDArray[np.float64]] | None:
@@ -676,9 +725,9 @@ class GL:
         porque o z de NDC já é afim em coordenadas de tela, ver
         `GL._project_points`) e comparada com `GL.depth_buffer`. Só as
         subamostras mais próximas da câmera do que o que já estava
-        registrado sobrevivem: têm `GL.depth_buffer` atualizado com a nova
-        profundidade e são as únicas devolvidas, o que resolve oclusão entre
-        triângulos que se cruzam independente da ordem de desenho.
+        registrado sobrevivem e são as únicas devolvidas, o que resolve
+        oclusão entre triângulos que se cruzam independente da ordem de
+        desenho.
 
         Parameters
         ----------
@@ -687,6 +736,13 @@ class GL:
             (x, y, w, z) em coordenadas de tela, com w o componente w do
             espaço de clip e z o componente z de NDC, ambos devolvidos por
             `GL._project_points`.
+        escreve_profundidade : bool, optional
+            Se True (padrão), subamostras aprovadas no teste de z-buffer
+            atualizam `GL.depth_buffer` com a nova profundidade. Geometria
+            transparente passa False aqui: ela ainda é ocluída por (e testa
+            contra) geometria mais próxima já desenhada, mas não grava sua
+            própria profundidade, para não ocluir incorretamente outra
+            geometria transparente desenhada depois dela na mesma região.
 
         Returns
         -------
@@ -775,7 +831,8 @@ class GL:
         sy_idx, sx_idx = sy_idx[aprovado], sx_idx[aprovado]
         pesos = pesos[:, aprovado]
 
-        GL.depth_buffer[ys_full, xs_full, sy_idx, sx_idx] = profundidade[aprovado]
+        if escreve_profundidade:
+            GL.depth_buffer[ys_full, xs_full, sy_idx, sx_idx] = profundidade[aprovado]
 
         # Correção de perspectiva: divide cada peso pelo w do respectivo
         # vértice e renormaliza para voltar a somar 1.
@@ -787,7 +844,8 @@ class GL:
     @staticmethod
     def _scan_triangle_color(v0: VerticeProjetado, cor0: npt.NDArray[np.float64],
                              v1: VerticeProjetado, cor1: npt.NDArray[np.float64],
-                             v2: VerticeProjetado, cor2: npt.NDArray[np.float64]
+                             v2: VerticeProjetado, cor2: npt.NDArray[np.float64],
+                             alpha: float = 1.0
                              ) -> None:
         """
         Varre um triângulo 2D com cor interpolada por vértice (Gouraud shading).
@@ -798,7 +856,9 @@ class GL:
         que deveria, porque a área em tela por si só não reflete a
         profundidade real do ponto na câmera. `GL._triangle_coverage` também
         faz o teste de z-buffer, então subamostras encobertas por geometria
-        já desenhada mais perto da câmera não são escritas aqui.
+        já desenhada mais perto da câmera não são escritas aqui. `alpha` < 1
+        mistura a cor com o que já está no buffer em vez de sobrescrever
+        (ver `GL._blend_write`) e não atualiza o z-buffer.
 
         Parameters
         ----------
@@ -809,13 +869,16 @@ class GL:
         cor0, cor1, cor2 : NDArray[float64]
             Cor de cada vértice (na mesma ordem), no formato X3D [r, g, b]
             com cada canal em [0, 1].
+        alpha : float, optional
+            Opacidade da geometria em [0, 1] (`1 - transparency` do
+            Material X3D), por padrão 1.0 (opaco).
 
         Returns
         -------
         None
             Escreve em GL.ms_buffer; não há retorno.
         """
-        cobertura = GL._triangle_coverage(v0, v1, v2)
+        cobertura = GL._triangle_coverage(v0, v1, v2, escreve_profundidade=alpha >= 1.0)
 
         if cobertura is None:
             return
@@ -826,7 +889,7 @@ class GL:
                + pesos[2][:, None] * cor2)
         cor_rgb8 = np.clip(GL._round(cor * 255), 0, 255).astype(np.uint8)
 
-        GL.ms_buffer[ys, xs, sy, sx] = cor_rgb8
+        GL._blend_write(ys, xs, sy, sx, cor_rgb8, alpha)
 
     @staticmethod
     def _select_mip_level(x0: float, y0: float, x1: float, y1: float, x2: float, y2: float,
@@ -892,7 +955,8 @@ class GL:
     def _scan_triangle_textured(v0: VerticeProjetado, uv0: npt.NDArray[np.float64],
                                 v1: VerticeProjetado, uv1: npt.NDArray[np.float64],
                                 v2: VerticeProjetado, uv2: npt.NDArray[np.float64],
-                                mipmaps: list[npt.NDArray[np.uint8]]) -> None:
+                                mipmaps: list[npt.NDArray[np.uint8]],
+                                alpha: float = 1.0) -> None:
         """
         Varre um triângulo 2D com uma textura mapeada por coordenadas UV por vértice.
 
@@ -904,7 +968,9 @@ class GL:
         textura distorce em superfícies inclinadas em relação à câmera.
         `GL._triangle_coverage` também faz o teste de z-buffer, então
         subamostras encobertas por geometria já desenhada mais perto da
-        câmera não são escritas aqui.
+        câmera não são escritas aqui. `alpha` < 1 mistura a cor com o que já
+        está no buffer em vez de sobrescrever (ver `GL._blend_write`) e não
+        atualiza o z-buffer.
 
         Parameters
         ----------
@@ -918,13 +984,16 @@ class GL:
             Cadeia de mipmaps da textura, do nível 0 (original) ao 1x1,
             no formato devolvido por `GL._get_texture_mipmaps` (cada nível
             com eixos [u][v], como `gpu.GPU.load_texture`).
+        alpha : float, optional
+            Opacidade da geometria em [0, 1] (`1 - transparency` do
+            Material X3D), por padrão 1.0 (opaco).
 
         Returns
         -------
         None
             Escreve em GL.ms_buffer; não há retorno.
         """
-        cobertura = GL._triangle_coverage(v0, v1, v2)
+        cobertura = GL._triangle_coverage(v0, v1, v2, escreve_profundidade=alpha >= 1.0)
 
         if cobertura is None:
             return
@@ -951,7 +1020,7 @@ class GL:
         # transpose de GPU.load_texture) é o topo, daí o (1 - v).
         ty = np.clip(((1.0 - v) * altura).astype(np.int64), 0, altura - 1)
 
-        GL.ms_buffer[ys, xs, sy, sx] = textura[tx, ty, :3]
+        GL._blend_write(ys, xs, sy, sx, textura[tx, ty, :3], alpha)
 
     @staticmethod
     def _get_texture(current_texture: list[str]) -> npt.NDArray[np.uint8] | None:
@@ -1358,6 +1427,7 @@ class GL:
             retorno.
         """
         cor = GL._to_rgb8(colors["emissiveColor"])
+        alpha = 1.0 - colors["transparency"]
         tela_x, tela_y, tela_w, tela_z = GL._project_points(point)
 
         n_tri = len(tela_x) // 3
@@ -1373,7 +1443,7 @@ class GL:
         idx1: list[int] = i1.tolist()
         idx2: list[int] = i2.tolist()
         for a, b, c in zip(idx0, idx1, idx2):
-            GL._scan_triangle_depth(verts[a], verts[b], verts[c], cor)
+            GL._scan_triangle_depth(verts[a], verts[b], verts[c], cor, alpha)
 
     @staticmethod
     def viewpoint(position: list[float], orientation: list[float], fieldOfView: float) -> None:
@@ -1554,6 +1624,7 @@ class GL:
             retorno.
         """
         cor = GL._to_rgb8(colors["emissiveColor"])
+        alpha = 1.0 - colors["transparency"]
         tela_x, tela_y, tela_w, tela_z = GL._project_points(point)
 
         # Array contento a quantidade de vértices de cada tira
@@ -1579,7 +1650,7 @@ class GL:
         idx1: list[int] = i1.tolist()
         idx2: list[int] = i2.tolist()
         for a, b, c in zip(idx0, idx1, idx2):
-            GL._scan_triangle_depth(verts[a], verts[b], verts[c], cor)
+            GL._scan_triangle_depth(verts[a], verts[b], verts[c], cor, alpha)
 
     @staticmethod
     def indexedTriangleStripSet(point: list[float], index: list[int], colors: Colors) -> None:
@@ -1611,6 +1682,7 @@ class GL:
             retorno.
         """
         cor = GL._to_rgb8(colors["emissiveColor"])
+        alpha = 1.0 - colors["transparency"]
         tela_x, tela_y, tela_w, tela_z = GL._project_points(point)
 
         idx = np.asarray(index, dtype=np.int64)
@@ -1631,7 +1703,7 @@ class GL:
         idx1: list[int] = i1.tolist()
         idx2: list[int] = i2.tolist()
         for a, b, c in zip(idx0, idx1, idx2):
-            GL._scan_triangle_depth(verts[a], verts[b], verts[c], cor)
+            GL._scan_triangle_depth(verts[a], verts[b], verts[c], cor, alpha)
 
     @staticmethod
     def indexedFaceSet(coord: list[float], coordIndex: list[int], colorPerVertex: bool,
@@ -1713,6 +1785,7 @@ class GL:
         idx0: list[int] = i0.tolist()
         idx1: list[int] = i1.tolist()
         idx2: list[int] = i2.tolist()
+        alpha = 1.0 - colors["transparency"]
 
         # Textura: só se houver imagem e coordenada de textura, e a topologia de
         # texCoordIndex (ou o fallback coordIndex) bater com a de coordIndex:
@@ -1735,7 +1808,7 @@ class GL:
                                                        zip(uv0, uv1, uv2)):
 
                     GL._scan_triangle_textured(verts[a], uva, verts[b], uvb,
-                                               verts[c], uvc, mipmaps)
+                                               verts[c], uvc, mipmaps, alpha)
                 return
 
         if color:
@@ -1755,7 +1828,7 @@ class GL:
                     for (a, b, c), (ca, cb, cc) in zip(zip(idx0, idx1, idx2),
                                                         zip(cor0, cor1, cor2)):
 
-                        GL._scan_triangle_color(verts[a], ca, verts[b], cb, verts[c], cc)
+                        GL._scan_triangle_color(verts[a], ca, verts[b], cb, verts[c], cc, alpha)
                     return
             else:
                 # Uma cor por face inteira: colorIndex (se houver) indexa por
@@ -1769,14 +1842,14 @@ class GL:
                 cor_tri = GL._to_rgb8(cores[color_idx_por_tri])
 
                 for a, b, c, cor in zip(idx0, idx1, idx2, cor_tri):
-                    GL._scan_triangle_depth(verts[a], verts[b], verts[c], cor)
+                    GL._scan_triangle_depth(verts[a], verts[b], verts[c], cor, alpha)
 
                 return
 
         cor = GL._to_rgb8(colors["emissiveColor"])
 
         for a, b, c in zip(idx0, idx1, idx2):
-            GL._scan_triangle_depth(verts[a], verts[b], verts[c], cor)
+            GL._scan_triangle_depth(verts[a], verts[b], verts[c], cor, alpha)
 
     @staticmethod
     def box(size: list[float], colors: Colors) -> None:
