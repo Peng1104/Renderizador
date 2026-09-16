@@ -1706,6 +1706,187 @@ class GL:
             GL._scan_triangle_depth(verts[a], verts[b], verts[c], cor, alpha)
 
     @staticmethod
+    def _fill_face_set_textured(idx0: list[int], idx1: list[int], idx2: list[int],
+                                verts: list[VerticeProjetado], frente: npt.NDArray[np.bool_],
+                                texCoord: list[float], texCoordIndex: list[int],
+                                coordIndex: list[int], current_texture: list[str],
+                                alpha: float) -> bool:
+        """
+        Tenta preencher as faces de um IndexedFaceSet com textura.
+
+        Extraído de `GL.indexedFaceSet` para reduzir sua complexidade
+        cognitiva: a decisão de usar textura, o teste de topologia de
+        `texCoordIndex` e o laço de varredura ficam isolados aqui.
+
+        Parameters
+        ----------
+        idx0, idx1, idx2 : list[int]
+            Índices (em `verts`) do primeiro, segundo e terceiro vértice de
+            cada triângulo já triangulado em leque e filtrado por
+            back-face culling.
+        verts : list[VerticeProjetado]
+            Vértices já projetados em coordenadas de tela (ver
+            `GL._project_points`), indexados por `idx0`/`idx1`/`idx2`.
+        frente : NDArray[bool_]
+            Máscara de back-face culling usada para os triângulos de
+            `idx0`/`idx1`/`idx2`, para filtrar `texCoordIndex` na mesma
+            topologia.
+        texCoord : list[float]
+            Coordenadas de textura por vértice no formato [u0, v0, u1, v1, ...].
+        texCoordIndex : list[int]
+            Índices de coordenada de textura (em `texCoord`), mesmo formato
+            de `coordIndex`; se vazio, usa-se `coordIndex` no lugar.
+        coordIndex : list[int]
+            Índices de vértice originais (antes do leque), usados como
+            fallback de `texCoordIndex` quando este está vazio.
+        current_texture : list[str]
+            Caminho(s) da textura atual do Appearance, se houver.
+        alpha : float
+            Opacidade da geometria em [0, 1] (`1 - transparency`).
+
+        Returns
+        -------
+        bool
+            True se havia textura e a topologia de `texCoordIndex` bateu
+            com a de `coordIndex` (e os triângulos já foram desenhados,
+            terminando o preenchimento da face). False se não há textura,
+            ou a topologia não bate e o chamador deve tentar outro
+            preenchimento.
+        """
+        mipmaps = GL._get_texture_mipmaps(current_texture) if texCoord and current_texture else None
+
+        if mipmaps is None:
+            return False
+
+        tidx = np.asarray(texCoordIndex if texCoordIndex else coordIndex, dtype=np.int64)
+        ti0, ti1, ti2, _ = GL._fan_triangulate(tidx)
+
+        if ti0.size != frente.size:
+            return False
+
+        ti0, ti1, ti2 = ti0[frente], ti1[frente], ti2[frente]
+        uv = np.asarray(texCoord, dtype=np.float64).reshape(-1, 2)
+        uv0, uv1, uv2 = uv[ti0], uv[ti1], uv[ti2]
+
+        # zip de 6 iteráveis cai no overload genérico Iterable[Any] do
+        # typeshed (só tipa até 5); zipar índices e uv's em dois 3-tuplos
+        # primeiro mantém os 3 zips dentro do limite tipado.
+        for (a, b, c), (uva, uvb, uvc) in zip(zip(idx0, idx1, idx2), zip(uv0, uv1, uv2)):
+            GL._scan_triangle_textured(verts[a], uva, verts[b], uvb,
+                                       verts[c], uvc, mipmaps, alpha)
+
+        return True
+
+    @staticmethod
+    def _fill_face_set_color_per_vertex(idx0: list[int], idx1: list[int], idx2: list[int],
+                                        verts: list[VerticeProjetado],
+                                        frente: npt.NDArray[np.bool_], color: list[float],
+                                        colorIndex: list[int], coordIndex: list[int],
+                                        alpha: float) -> bool:
+        """
+        Tenta preencher as faces de um IndexedFaceSet com cor por vértice (Gouraud).
+
+        Extraído de `GL.indexedFaceSet` pelo mesmo motivo de
+        `GL._fill_face_set_textured`: isola o teste de topologia de
+        `colorIndex` e o laço de varredura.
+
+        Parameters
+        ----------
+        idx0, idx1, idx2 : list[int]
+            Índices (em `verts`) de cada triângulo já triangulado em leque
+            e filtrado por back-face culling.
+        verts : list[VerticeProjetado]
+            Vértices já projetados em coordenadas de tela.
+        frente : NDArray[bool_]
+            Máscara de back-face culling, para filtrar `colorIndex` na
+            mesma topologia.
+        color : list[float]
+            Cores por vértice no formato [r0, g0, b0, r1, g1, b1, ...].
+        colorIndex : list[int]
+            Índices de cor (em `color`), mesmo formato de `coordIndex`; se
+            vazio, usa-se `coordIndex` no lugar.
+        coordIndex : list[int]
+            Índices de vértice originais, usados como fallback de
+            `colorIndex` quando este está vazio.
+        alpha : float
+            Opacidade da geometria em [0, 1] (`1 - transparency`).
+
+        Returns
+        -------
+        bool
+            True se a topologia de `colorIndex` bateu com a de
+            `coordIndex` (e os triângulos já foram desenhados). False se a
+            topologia não bate e o chamador deve tentar outro preenchimento.
+        """
+        cores = np.asarray(color, dtype=np.float64).reshape(-1, 3)
+        cidx = np.asarray(colorIndex if colorIndex else coordIndex, dtype=np.int64)
+        ci0, ci1, ci2, _ = GL._fan_triangulate(cidx)
+
+        if ci0.size != frente.size:
+            return False
+
+        ci0, ci1, ci2 = ci0[frente], ci1[frente], ci2[frente]
+        cor0, cor1, cor2 = cores[ci0], cores[ci1], cores[ci2]
+
+        # Mesmo motivo do zip duplo em GL._fill_face_set_textured.
+        for (a, b, c), (ca, cb, cc) in zip(zip(idx0, idx1, idx2), zip(cor0, cor1, cor2)):
+            GL._scan_triangle_color(verts[a], ca, verts[b], cb, verts[c], cc, alpha)
+
+        return True
+
+    @staticmethod
+    def _fill_face_set_color_per_face(idx0: list[int], idx1: list[int], idx2: list[int],
+                                      verts: list[VerticeProjetado],
+                                      face_id: npt.NDArray[np.int64], color: list[float],
+                                      colorIndex: list[int], alpha: float) -> None:
+        """
+        Preenche as faces de um IndexedFaceSet com uma cor sólida por face inteira.
+
+        Extraído de `GL.indexedFaceSet` pelo mesmo motivo de
+        `GL._fill_face_set_textured`. Ao contrário da variante por vértice,
+        sempre desenha: uma cor por face, diferente de coordenada de
+        textura ou cor por vértice, não tem uma topologia própria de
+        `colorIndex` (um índice por face, sem separadores -1) que possa
+        divergir de `coordIndex`.
+
+        Parameters
+        ----------
+        idx0, idx1, idx2 : list[int]
+            Índices (em `verts`) de cada triângulo já triangulado em leque
+            e filtrado por back-face culling.
+        verts : list[VerticeProjetado]
+            Vértices já projetados em coordenadas de tela.
+        face_id : NDArray[int64]
+            Posição, na lista de faces do IndexedFaceSet, da face de origem
+            de cada triângulo em `idx0`/`idx1`/`idx2` (0-based, já filtrada
+            por back-face culling).
+        color : list[float]
+            Cores por face no formato [r0, g0, b0, r1, g1, b1, ...].
+        colorIndex : list[int]
+            Índices de cor (em `color`) por face, sem separadores -1; se
+            vazio, a i-ésima face usa a i-ésima cor (a própria `face_id`).
+        alpha : float
+            Opacidade da geometria em [0, 1] (`1 - transparency`).
+
+        Returns
+        -------
+        None
+            A função escreve no buffer de multisample da GL (GL.ms_buffer); não há
+            retorno.
+        """
+        cores = np.asarray(color, dtype=np.float64).reshape(-1, 3)
+
+        if colorIndex:
+            color_idx_por_tri = np.asarray(colorIndex, dtype=np.int64)[face_id]
+        else:
+            color_idx_por_tri = face_id
+
+        cor_tri = GL._to_rgb8(cores[color_idx_por_tri])
+
+        for a, b, c, cor in zip(idx0, idx1, idx2, cor_tri):
+            GL._scan_triangle_depth(verts[a], verts[b], verts[c], cor, alpha)
+
+    @staticmethod
     def indexedFaceSet(coord: list[float], coordIndex: list[int], colorPerVertex: bool,
                        color: list[float], colorIndex: list[int],
                        texCoord: list[float], texCoordIndex: list[int],
@@ -1787,63 +1968,25 @@ class GL:
         idx2: list[int] = i2.tolist()
         alpha = 1.0 - colors["transparency"]
 
-        # Textura: só se houver imagem e coordenada de textura, e a topologia de
-        # texCoordIndex (ou o fallback coordIndex) bater com a de coordIndex:
-        # Exigido pela spec X3D, mas verificado aqui por segurança.
-        mipmaps = GL._get_texture_mipmaps(current_texture) if texCoord and current_texture else None
-
-        if mipmaps is not None:
-            tidx = np.asarray(texCoordIndex if texCoordIndex else coordIndex, dtype=np.int64)
-            ti0, ti1, ti2, _ = GL._fan_triangulate(tidx)
-
-            if ti0.size == frente.size:
-                ti0, ti1, ti2 = ti0[frente], ti1[frente], ti2[frente]
-                uv = np.asarray(texCoord, dtype=np.float64).reshape(-1, 2)
-                uv0, uv1, uv2 = uv[ti0], uv[ti1], uv[ti2]
-
-                # zip de 6 iteráveis cai no overload genérico Iterable[Any] do
-                # typeshed (só tipa até 5); zipar índices e uv's em dois
-                # 3-tuplos primeiro mantém os 3 zips dentro do limite tipado.
-                for (a, b, c), (uva, uvb, uvc) in zip(zip(idx0, idx1, idx2),
-                                                       zip(uv0, uv1, uv2)):
-
-                    GL._scan_triangle_textured(verts[a], uva, verts[b], uvb,
-                                               verts[c], uvc, mipmaps, alpha)
-                return
+        # Prioridade de preenchimento (mutuamente exclusivas, como no X3D):
+        # textura > cor por vértice/face > colors["emissiveColor"] flat.
+        # Cada tentativa devolve False (e cai para a próxima prioridade) se
+        # a topologia do índice correspondente não bater com a de
+        # coordIndex, exigido pela spec X3D mas verificado aqui por
+        # segurança.
+        if GL._fill_face_set_textured(idx0, idx1, idx2, verts, frente,
+                                      texCoord, texCoordIndex, coordIndex,
+                                      current_texture, alpha):
+            return
 
         if color:
-            cores = np.asarray(color, dtype=np.float64).reshape(-1, 3)
-
             if colorPerVertex:
-                cidx = np.asarray(colorIndex if colorIndex else coordIndex, dtype=np.int64)
-                ci0, ci1, ci2, _ = GL._fan_triangulate(cidx)
-
-                if ci0.size == frente.size:
-                    ci0, ci1, ci2 = ci0[frente], ci1[frente], ci2[frente]
-                    cor0, cor1, cor2 = cores[ci0], cores[ci1], cores[ci2]
-
-                    # Mesmo motivo do laço de textura acima: dois zips de 3
-                    # em vez de um só de 6, para não cair no overload
-                    # genérico Iterable[Any] do typeshed.
-                    for (a, b, c), (ca, cb, cc) in zip(zip(idx0, idx1, idx2),
-                                                        zip(cor0, cor1, cor2)):
-
-                        GL._scan_triangle_color(verts[a], ca, verts[b], cb, verts[c], cc, alpha)
+                if GL._fill_face_set_color_per_vertex(idx0, idx1, idx2, verts, frente,
+                                                       color, colorIndex, coordIndex, alpha):
                     return
             else:
-                # Uma cor por face inteira: colorIndex (se houver) indexa por
-                # face, sem separadores -1; sem colorIndex, a i-ésima face usa
-                # a i-ésima cor (face_id já é essa posição, 0-based).
-                if colorIndex:
-                    color_idx_por_tri = np.asarray(colorIndex, dtype=np.int64)[face_id]
-                else:
-                    color_idx_por_tri = face_id
-
-                cor_tri = GL._to_rgb8(cores[color_idx_por_tri])
-
-                for a, b, c, cor in zip(idx0, idx1, idx2, cor_tri):
-                    GL._scan_triangle_depth(verts[a], verts[b], verts[c], cor, alpha)
-
+                GL._fill_face_set_color_per_face(idx0, idx1, idx2, verts, face_id,
+                                                 color, colorIndex, alpha)
                 return
 
         cor = GL._to_rgb8(colors["emissiveColor"])
