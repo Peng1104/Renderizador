@@ -20,6 +20,8 @@ dev = [
 
 [tool.pyright]
 typeCheckingMode = "strict"
+# gpu, gl e x3d são módulos irmãos em renderizador/, importados como topo de pacote.
+extraPaths = ["renderizador"]
 
 [tool.ruff]
 line-length = 100
