@@ -40,7 +40,7 @@ class Renderizador:
         self.scene: x3d.X3D | None = None
         self.framebuffers: dict[str, int] = {}
         # Fator de supersampling (SSAA) opcional, além do 4x MSAA feito pela
-        # GL (GL.MSAA_AMOSTRAS): desenha internamente em resolução
+        # GL (gl._constantes.MSAA_AMOSTRAS): desenha internamente em resolução
         # width*fator x height*fator e reduz por média de blocos em pos(),
         # suavizando ainda mais. Se 1 só o MSAA da GL atua.
         self.supersampling: int = 1
