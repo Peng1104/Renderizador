@@ -47,6 +47,17 @@ class Colors(TypedDict):
     transparency: float
     ambientIntensity: float
 
+class Luz(TypedDict):
+    """
+    Fonte de luz direcional ativa no frame, já em coordenadas de mundo.
+    """
+
+    direcao: npt.NDArray[np.float64]  # unitário, sentido em que a luz viaja
+    cor: npt.NDArray[np.float64]
+    intensidade: float
+    ambiente: float
+
+
 class Pointo2D:
     """
     Classe que representa um ponto 2D.
@@ -120,6 +131,15 @@ class GL:
     # bound500.x3d (500 draw calls de 1 triângulo cada, ver GL._prepare_edges_and_bbox).
     _LOTE_MINIMO: ClassVar[int] = 8
 
+    # Luzes direcionais do frame corrente, em coordenadas de mundo. Esvaziada em
+    # GL.clear() e preenchida por GL.navigationInfo (headlight) e
+    # GL.directionalLight, que o grafo de cena visita antes das geometrias.
+    lights: ClassVar[list[Luz]]
+
+    # Posição da câmera em coordenadas de mundo (definida em GL.viewpoint), usada
+    # no vetor até o observador do termo especular.
+    camera_position: ClassVar[npt.NDArray[np.float64]]
+
     # Resolução da tesselação das primitivas curvas: fatias ao redor do eixo
     # (esfera, cone, cilindro) e faixas de latitude da esfera.
     _SEGMENTOS: ClassVar[int] = 48
@@ -158,6 +178,8 @@ class GL:
         GL.view_matrix = np.identity(4)
         GL.perspective_matrix = np.identity(4)
         GL.transform_stack = [np.identity(4)]
+        GL.lights = []
+        GL.camera_position = np.zeros(3)
         GL.ms_buffer = np.zeros(
             (height, width, GL.MSAA_AMOSTRAS, GL.MSAA_AMOSTRAS, 3), dtype=np.uint8)
         GL.depth_buffer = np.ones(
@@ -178,6 +200,7 @@ class GL:
         gpu.GPU.clear_buffer()
         GL.ms_buffer[:] = gpu.GPU.clear_color_val
         GL.depth_buffer[:] = 1.0
+        GL.lights = []
 
     @staticmethod
     def resolve_multisample() -> None:
@@ -1680,8 +1703,6 @@ class GL:
             A função escreve no buffer de multisample da GL (GL.ms_buffer); não há
             retorno.
         """
-        cor = GL._to_rgb8(colors["emissiveColor"])
-        alpha = 1.0 - colors["transparency"]
         tela_x, tela_y, tela_w, tela_z = GL._project_points(point)
 
         n_tri = len(tela_x) // 3
@@ -1693,15 +1714,13 @@ class GL:
 
         verts: list[VerticeProjetado] = list(
             zip(tela_x.tolist(), tela_y.tolist(), tela_w.tolist(), tela_z.tolist()))
-        idx0: list[int] = i0.tolist()
-        idx1: list[int] = i1.tolist()
-        idx2: list[int] = i2.tolist()
+        i0.tolist()
+        i1.tolist()
+        i2.tolist()
 
         arestas_l, bboxes = GL._prepare_edges_and_bbox(tela_x, tela_y, i0, i1, i2)
 
-        for t, (a, b, c) in enumerate(zip(idx0, idx1, idx2)):
-            GL._scan_triangle_depth(verts[a], verts[b], verts[c],
-                                    arestas_l[t], bboxes[t], cor, alpha)
+        GL._fill_triangles(point, verts, i0, i1, i2, arestas_l, bboxes, colors)
 
     @staticmethod
     def viewpoint(position: list[float], orientation: list[float], fieldOfView: float) -> None:
@@ -1730,6 +1749,7 @@ class GL:
         # A view é a inversa: para uma matriz de rotação + translação, a inversa é a
         # transposta do bloco de rotação seguida da translação negada.
         GL.view_matrix = np.linalg.inv(camera_para_mundo)
+        GL.camera_position = np.asarray(position, dtype=np.float64)
 
         aspect = GL.width / GL.height
 
@@ -1881,8 +1901,6 @@ class GL:
             A função escreve no buffer de multisample da GL (GL.ms_buffer); não há
             retorno.
         """
-        cor = GL._to_rgb8(colors["emissiveColor"])
-        alpha = 1.0 - colors["transparency"]
         tela_x, tela_y, tela_w, tela_z = GL._project_points(point)
 
         # Array contento a quantidade de vértices de cada tira
@@ -1904,15 +1922,13 @@ class GL:
         verts: list[VerticeProjetado] = list(
             zip(tela_x.tolist(), tela_y.tolist(), tela_w.tolist(), tela_z.tolist()))
 
-        idx0: list[int] = i0.tolist()
-        idx1: list[int] = i1.tolist()
-        idx2: list[int] = i2.tolist()
+        i0.tolist()
+        i1.tolist()
+        i2.tolist()
 
         arestas_l, bboxes = GL._prepare_edges_and_bbox(tela_x, tela_y, i0, i1, i2)
 
-        for t, (a, b, c) in enumerate(zip(idx0, idx1, idx2)):
-            GL._scan_triangle_depth(verts[a], verts[b], verts[c],
-                                    arestas_l[t], bboxes[t], cor, alpha)
+        GL._fill_triangles(point, verts, i0, i1, i2, arestas_l, bboxes, colors)
 
     @staticmethod
     def indexedTriangleStripSet(point: list[float], index: list[int], colors: Colors) -> None:
@@ -1943,8 +1959,6 @@ class GL:
             A função escreve no buffer de multisample da GL (GL.ms_buffer); não há
             retorno.
         """
-        cor = GL._to_rgb8(colors["emissiveColor"])
-        alpha = 1.0 - colors["transparency"]
         tela_x, tela_y, tela_w, tela_z = GL._project_points(point)
 
         idx = np.asarray(index, dtype=np.int64)
@@ -1961,15 +1975,13 @@ class GL:
 
         verts: list[VerticeProjetado] = list(
             zip(tela_x.tolist(), tela_y.tolist(), tela_w.tolist(), tela_z.tolist()))
-        idx0: list[int] = i0.tolist()
-        idx1: list[int] = i1.tolist()
-        idx2: list[int] = i2.tolist()
+        i0.tolist()
+        i1.tolist()
+        i2.tolist()
 
         arestas_l, bboxes = GL._prepare_edges_and_bbox(tela_x, tela_y, i0, i1, i2)
 
-        for t, (a, b, c) in enumerate(zip(idx0, idx1, idx2)):
-            GL._scan_triangle_depth(verts[a], verts[b], verts[c],
-                                    arestas_l[t], bboxes[t], cor, alpha)
+        GL._fill_triangles(point, verts, i0, i1, i2, arestas_l, bboxes, colors)
 
     @staticmethod
     def _fill_face_set_textured(idx0: list[int], idx1: list[int], idx2: list[int],
@@ -2279,11 +2291,7 @@ class GL:
                                                  color, colorIndex, arestas_l, bboxes, alpha)
                 return
 
-        cor = GL._to_rgb8(colors["emissiveColor"])
-
-        for t, (a, b, c) in enumerate(zip(idx0, idx1, idx2)):
-            GL._scan_triangle_depth(verts[a], verts[b], verts[c],
-                                    arestas_l[t], bboxes[t], cor, alpha)
+        GL._fill_triangles(coord, verts, i0, i1, i2, arestas_l, bboxes, colors)
 
     @staticmethod
     def _circle_xz(segmentos: int) -> tuple[npt.NDArray[np.float64], npt.NDArray[np.float64]]:
@@ -2493,13 +2501,222 @@ class GL:
         return GL._mesh_cache[chave]
 
     @staticmethod
+    def _to_world(posicoes: npt.NDArray[np.float64], normais: npt.NDArray[np.float64] | None
+                  ) -> tuple[npt.NDArray[np.float64], npt.NDArray[np.float64] | None]:
+        """
+        Leva posições e normais de coordenadas de objeto para coordenadas de mundo.
+
+        As posições usam a matriz de modelo corrente (topo da pilha). As
+        normais usam a inversa transposta dela, para que escalas não
+        uniformes não as deformem, e são renormalizadas.
+
+        Parameters
+        ----------
+        posicoes : NDArray[float64]
+            Posições (N, 3) em coordenadas de objeto.
+        normais : NDArray[float64] or None
+            Normais (N, 3) em coordenadas de objeto, ou None se só as
+            posições interessam.
+
+        Returns
+        -------
+        NDArray[float64]
+            Posições (N, 3) em coordenadas de mundo.
+        NDArray[float64] or None
+            Normais unitárias (N, 3) em coordenadas de mundo, ou None.
+        """
+        modelo = GL.transform_stack[-1]
+        mundo = posicoes @ modelo[:3, :3].T + modelo[:3, 3]
+        if normais is None:
+            return mundo, None
+        n = normais @ np.linalg.inv(modelo)[:3, :3]
+        comprimento = np.linalg.norm(n, axis=1, keepdims=True)
+        return mundo, n / np.where(comprimento == 0, 1.0, comprimento)
+
+    @staticmethod
+    def _shade(pos: npt.NDArray[np.float64], normal: npt.NDArray[np.float64],
+               colors: Colors) -> npt.NDArray[np.float64]:
+        r"""
+        Calcula a cor iluminada de pontos de uma superfície (modelo de Phong).
+
+        Para cada luz direcional ativa, com $L$ apontando para a luz, $V$
+        para a câmera e $H$ o vetor intermediário entre eles:
+
+        $$
+        C = E + \sum_L \Big[ a_L\, c_L\, k_a\, D
+            + i_L\, c_L \big( D\,\max(N \cdot L, 0)
+            + S\,\max(N \cdot H, 0)^{128 s} \big) \Big]
+        $$
+
+        em que $E$, $D$, $S$ e $s$ são a emissiva, a difusa, a especular e o
+        `shininess` do material, e $k_a$ o seu `ambientIntensity`. O
+        termo especular só existe onde $N \cdot L > 0$. O resultado é
+        recortado a [0, 1].
+
+        Parameters
+        ----------
+        pos : NDArray[float64]
+            Posições (N, 3) em coordenadas de mundo.
+        normal : NDArray[float64]
+            Normais unitárias (N, 3) em coordenadas de mundo.
+        colors : Colors
+            Cores resolvidas do Appearance/Material do nó.
+
+        Returns
+        -------
+        NDArray[float64]
+            Cores (N, 3) com cada canal em [0, 1].
+        """
+        emissiva = np.asarray(colors["emissiveColor"], dtype=np.float64)
+        resultado = np.tile(emissiva, (len(pos), 1))
+        if not GL.lights:
+            return resultado
+
+        difusa = np.asarray(colors["diffuseColor"], dtype=np.float64)
+        especular = np.asarray(colors["specularColor"], dtype=np.float64)
+        expoente = colors["shininess"] * 128.0
+        para_camera = GL.camera_position - pos
+        para_camera /= np.maximum(np.linalg.norm(para_camera, axis=1, keepdims=True), 1e-12)
+
+        for luz in GL.lights:
+            para_luz = -luz["direcao"]
+            n_l = np.maximum(normal @ para_luz, 0.0)[:, None]
+            meio = para_camera + para_luz
+            meio /= np.maximum(np.linalg.norm(meio, axis=1, keepdims=True), 1e-12)
+            n_h = np.maximum((normal * meio).sum(axis=1), 0.0)[:, None]
+            brilho = np.where(n_l > 0, n_h ** expoente, 0.0)
+
+            ambiente = luz["ambiente"] * colors["ambientIntensity"] * difusa
+            direta = difusa * n_l + especular * brilho
+            resultado += luz["cor"] * (ambiente + luz["intensidade"] * direta)
+
+        return np.clip(resultado, 0.0, 1.0)
+
+    @staticmethod
+    def _scan_triangle_lit(v0: VerticeProjetado, v1: VerticeProjetado, v2: VerticeProjetado,
+                           pos: npt.NDArray[np.float64], normal: npt.NDArray[np.float64],
+                           arestas: npt.NDArray[np.float64] | None,
+                           bbox: tuple[int, int, int, int] | None, colors: Colors,
+                           alpha: float) -> None:
+        """
+        Varre um triângulo calculando a iluminação em cada subamostra (Phong shading).
+
+        Interpola a posição e a normal de mundo com os pesos
+        perspectiva-corretos de `GL._triangle_coverage` e aplica `GL._shade`
+        em cada subamostra coberta. Por isso o brilho especular aparece no
+        interior de um triângulo, onde nenhum vértice o tem.
+
+        Parameters
+        ----------
+        v0, v1, v2 : VerticeProjetado
+            Vértices do triângulo, em coordenadas de tela.
+        pos : NDArray[float64]
+            Posições de mundo dos três vértices, array (3, 3).
+        normal : NDArray[float64]
+            Normais unitárias de mundo dos três vértices, array (3, 3).
+        arestas : NDArray[float64] or None
+            Coeficientes de aresta do triângulo (ver `GL._prepare_edges_and_bbox`).
+        bbox : tuple[int, int, int, int] or None
+            Bounding box do triângulo em pixels de tela, ou None junto com arestas=None.
+        colors : Colors
+            Cores resolvidas do Appearance/Material do nó.
+        alpha : float
+            Opacidade da geometria em [0, 1].
+
+        Returns
+        -------
+        None
+            Escreve em GL.ms_buffer; não há retorno.
+        """
+        cobertura = GL._triangle_coverage(v0, v1, v2, arestas, bbox,
+                                          escreve_profundidade=alpha >= 1.0)
+
+        if cobertura is None:
+            return
+
+        ys, xs, sy, sx, pesos = cobertura
+
+        n = pesos.T @ normal
+        n /= np.maximum(np.linalg.norm(n, axis=1, keepdims=True), 1e-12)
+        cor = GL._shade(pesos.T @ pos, n, colors)
+        cor_rgb8 = np.clip(GL._round(cor * 255), 0, 255).astype(np.uint8)
+
+        GL._blend_write(ys, xs, sy, sx, cor_rgb8, alpha)
+
+    @staticmethod
+    def _fill_triangles(posicoes: npt.ArrayLike, verts: list[VerticeProjetado],
+                        i0: npt.NDArray[np.int64], i1: npt.NDArray[np.int64],
+                        i2: npt.NDArray[np.int64],
+                        arestas_l: list[npt.NDArray[np.float64] | None],
+                        bboxes: list[tuple[int, int, int, int] | None], colors: Colors,
+                        normais: npt.NDArray[np.float64] | None = None) -> None:
+        """
+        Preenche triângulos já projetados com a cor do material, iluminada se houver luzes.
+
+        Sem luzes ativas, preenche flat com `colors["emissiveColor"]`. Com
+        luzes, sombreia por subamostra (`GL._scan_triangle_lit`), usando as
+        normais por vértice se dadas e, senão, a normal de cada face.
+
+        Parameters
+        ----------
+        posicoes : ArrayLike
+            Vértices em coordenadas de objeto, [x0, y0, z0, x1, ...] ou (N, 3).
+        verts : list[VerticeProjetado]
+            Vértices projetados, na mesma ordem de `posicoes`.
+        i0, i1, i2 : NDArray[int64]
+            Índices dos três vértices de cada triângulo (já sem os de costas).
+        arestas_l : list[NDArray[float64] or None]
+            Arestas de cada triângulo (ver `GL._prepare_edges_and_bbox`).
+        bboxes : list[tuple[int, int, int, int] or None]
+            Bounding box de cada triângulo.
+        colors : Colors
+            Cores resolvidas do Appearance/Material do nó.
+        normais : NDArray[float64] or None, optional
+            Normais (N, 3) em coordenadas de objeto, uma por vértice; se
+            None, usa-se a normal plana de cada triângulo.
+
+        Returns
+        -------
+        None
+            Escreve em GL.ms_buffer; não há retorno.
+        """
+        alpha = 1.0 - colors["transparency"]
+        idx0: list[int] = i0.tolist()
+        idx1: list[int] = i1.tolist()
+        idx2: list[int] = i2.tolist()
+
+        if not GL.lights:
+            cor = GL._to_rgb8(colors["emissiveColor"])
+            for t, (a, b, c) in enumerate(zip(idx0, idx1, idx2)):
+                GL._scan_triangle_depth(verts[a], verts[b], verts[c],
+                                        arestas_l[t], bboxes[t], cor, alpha)
+            return
+
+        mundo, n_mundo = GL._to_world(np.asarray(posicoes, dtype=np.float64).reshape(-1, 3),
+                                      normais)
+        tri = np.stack([i0, i1, i2], axis=1)
+        if n_mundo is None:
+            n_face = np.cross(mundo[i1] - mundo[i0], mundo[i2] - mundo[i0])
+            n_face /= np.maximum(np.linalg.norm(n_face, axis=1, keepdims=True), 1e-12)
+            n_tri = np.repeat(n_face[:, None, :], 3, axis=1)
+        else:
+            n_tri = n_mundo[tri]
+        pos_tri = mundo[tri]
+
+        for t, (a, b, c) in enumerate(zip(idx0, idx1, idx2)):
+            GL._scan_triangle_lit(verts[a], verts[b], verts[c], pos_tri[t], n_tri[t],
+                                  arestas_l[t], bboxes[t], colors, alpha)
+
+    @staticmethod
     def _draw_mesh(malha: Malha, colors: Colors) -> None:
         """
         Projeta, descarta faces de costas e rasteriza uma malha de triângulos indexada.
 
         Caminho comum das primitivas (Box, Sphere, Cone e Cylinder): elas só
         geram a malha, e o resto do pipeline é o mesmo de `GL.triangleSet`.
-        Preenche com `colors["emissiveColor"]`.
+        Sem luzes ativas, preenche com `colors["emissiveColor"]` (flat). Com
+        luzes, sombreia por subamostra com as normais interpoladas (Phong
+        shading, ver `GL._fill_triangles`).
 
         Parameters
         ----------
@@ -2513,7 +2730,7 @@ class GL:
         None
             Escreve em GL.ms_buffer; não há retorno.
         """
-        posicoes, _normais, triangulos = malha
+        posicoes, normais, triangulos = malha
         tela_x, tela_y, tela_w, tela_z = GL._project_points(posicoes.ravel().tolist())
 
         i0, i1, i2 = triangulos[:, 0], triangulos[:, 1], triangulos[:, 2]
@@ -2526,16 +2743,7 @@ class GL:
         verts: list[VerticeProjetado] = list(
             zip(tela_x.tolist(), tela_y.tolist(), tela_w.tolist(), tela_z.tolist()))
         arestas_l, bboxes = GL._prepare_edges_and_bbox(tela_x, tela_y, i0, i1, i2)
-        cor = GL._to_rgb8(colors["emissiveColor"])
-        alpha = 1.0 - colors["transparency"]
-
-        idx0: list[int] = i0.tolist()
-        idx1: list[int] = i1.tolist()
-        idx2: list[int] = i2.tolist()
-
-        for t, (a, b, c) in enumerate(zip(idx0, idx1, idx2)):
-            GL._scan_triangle_depth(verts[a], verts[b], verts[c],
-                                    arestas_l[t], bboxes[t], cor, alpha)
+        GL._fill_triangles(posicoes, verts, i0, i1, i2, arestas_l, bboxes, colors, normais)
 
     @staticmethod
     def box(size: list[float], colors: Colors) -> None:
@@ -2647,7 +2855,8 @@ class GL:
         """
         Processa NavigationInfo: características do avatar e do modo de visualização.
 
-        Ainda não implementado (stub) — ver comentário abaixo.
+        Com `headlight` ligado, acrescenta às luzes do frame uma luz direcional
+        branca presa à câmera. Deve ser chamada depois de `GL.viewpoint`.
 
         Parameters
         ----------
@@ -2658,7 +2867,8 @@ class GL:
         Returns
         -------
         None
-            Não há retorno.
+            Acrescenta a luz da câmera a GL.lights quando `headlight` é True;
+            não há retorno.
         """
         # https://www.web3d.org/specifications/X3Dv4/ISO-IEC19775-1v4-IS/Part01/components/navigation.html#NavigationInfo
         # O campo do headlight especifica se um navegador deve acender um luz direcional que
@@ -2667,8 +2877,12 @@ class GL:
         # A luz headlight deve ser direcional, ter intensidade = 1, cor = (1 1 1),
         # ambientIntensity = 0,0 e direção = (0 0 −1).
 
-        # O print abaixo é só para vocês verificarem o funcionamento, DEVE SER REMOVIDO.
-        print("NavigationInfo : headlight = {0}".format(headlight)) # imprime no terminal
+        if headlight:
+            # A direção (0, 0, -1) do headlight está no espaço da câmera; a rotação
+            # da view é ortogonal, então a inversa dela (camera -> mundo) é a transposta.
+            direcao = GL.view_matrix[:3, :3].T @ np.array([0.0, 0.0, -1.0])
+            GL.lights.append({"direcao": direcao, "cor": np.ones(3),
+                              "intensidade": 1.0, "ambiente": 0.0})
 
     @staticmethod
     def directionalLight(ambientIntensity: float, color: list[float], intensity: float,
@@ -2676,7 +2890,8 @@ class GL:
         """
         Processa DirectionalLight: uma luz direcional (raios paralelos).
 
-        Ainda não implementado (stub) — ver comentário abaixo.
+        A direção é levada ao espaço de mundo pela transformação corrente, de
+        modo que luzes dentro de um Transform giram com ele.
 
         Parameters
         ----------
@@ -2693,7 +2908,7 @@ class GL:
         Returns
         -------
         None
-            Não há retorno.
+            Acrescenta a luz a GL.lights; não há retorno.
         """
         # https://www.web3d.org/specifications/X3Dv4/ISO-IEC19775-1v4-IS/Part01/components/lighting.html#DirectionalLight
         # Define uma fonte de luz direcional que ilumina ao longo de raios paralelos
@@ -2702,11 +2917,10 @@ class GL:
         # que emana da fonte de luz no sistema de coordenadas local. A luz é emitida ao
         # longo de raios paralelos de uma distância infinita.
 
-        # O print abaixo é só para vocês verificarem o funcionamento, DEVE SER REMOVIDO.
-        print("DirectionalLight : ambientIntensity = {0}".format(ambientIntensity))
-        print("DirectionalLight : color = {0}".format(color)) # imprime no terminal
-        print("DirectionalLight : intensity = {0}".format(intensity)) # imprime no terminal
-        print("DirectionalLight : direction = {0}".format(direction)) # imprime no terminal
+        _, direcao = GL._to_world(np.zeros((1, 3)), np.array([direction], dtype=np.float64))
+        assert direcao is not None
+        GL.lights.append({"direcao": direcao[0], "cor": np.asarray(color, dtype=np.float64),
+                          "intensidade": intensity, "ambiente": ambientIntensity})
 
     @staticmethod
     def pointLight(ambientIntensity: float, color: list[float], intensity: float,

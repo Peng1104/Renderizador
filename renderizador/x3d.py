@@ -1397,6 +1397,9 @@ class DirectionalLight(X3DLightNode):
         if "DirectionalLight" not in X3D.renderer:
             raise Exception("DirectionalLight não foi implementado.")
 
+        if not self.on:
+            return
+
         X3D.renderer["DirectionalLight"](ambientIntensity=self.ambientIntensity,
                                          color=self.color,
                                          intensity=self.intensity,
