@@ -1,4 +1,85 @@
 {
+  "00_aleatorios": {
+    "arquivo": "00_aleatorios000.png",
+    "forma": [
+      20,
+      30,
+      3
+    ],
+    "sha256": "63f3088d7a8d2d80e5febad9c34ce44b9b032c2a3c1608b14f8464456159ff0c"
+  },
+  "01_linhas_cores": {
+    "arquivo": "01_linhas_cores000.png",
+    "forma": [
+      20,
+      30,
+      3
+    ],
+    "sha256": "8105a13c23bb14b3c191994f62f17787a0504ca6a734b207e6648b0c70c3b7d5"
+  },
+  "02_octogono": {
+    "arquivo": "02_octogono000.png",
+    "forma": [
+      20,
+      30,
+      3
+    ],
+    "sha256": "de7591fcfaee4c8ca77500fd2f9f90476d587c9ac4a7b79a349550fc22d1d0c2"
+  },
+  "03_linhas_cruzes": {
+    "arquivo": "03_linhas_cruzes000.png",
+    "forma": [
+      20,
+      30,
+      3
+    ],
+    "sha256": "e8f53ff66d71b1f590d3b075b03df1632b3170c244b00a14a8d68d8bbb9b0ce2"
+  },
+  "04_varias_linhas": {
+    "arquivo": "04_varias_linhas000.png",
+    "forma": [
+      400,
+      600,
+      3
+    ],
+    "sha256": "a01ca872199a17c4873f2b05401d041843154b82920264c0d3aec3a0754a5bda"
+  },
+  "05_circulo": {
+    "arquivo": "05_circulo000.png",
+    "forma": [
+      20,
+      30,
+      3
+    ],
+    "sha256": "c1b9aed79685bf609a5c7500d870016744c46d35029a5e1d4f0d9c3a3bc9bcb2"
+  },
+  "06_triangulos": {
+    "arquivo": "06_triangulos000.png",
+    "forma": [
+      20,
+      30,
+      3
+    ],
+    "sha256": "39b67187692f0d229012b3498fba506e37c68070f5ff5f0917472629313acd2b"
+  },
+  "07_helice": {
+    "arquivo": "07_helice000.png",
+    "forma": [
+      20,
+      30,
+      3
+    ],
+    "sha256": "994f13f3c123dacee564416f460db471b07e38a656df152aab59574c86a2573e"
+  },
+  "08_pontas": {
+    "arquivo": "08_pontas000.png",
+    "forma": [
+      400,
+      600,
+      3
+    ],
+    "sha256": "2d33a84ca21b7dc833337a0079682315ff336645e3496a2e96f0662107be8385"
+  },
   "09_um_triangulo": {
     "arquivo": "09_um_triangulo000.png",
     "forma": [

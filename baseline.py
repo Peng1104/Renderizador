@@ -2,7 +2,7 @@
 """
 Baseline de regressão do renderizador.
 
-Renderiza um conjunto fixo de cenas e compara cada resultado, pixel a pixel,
+Renderiza um conjunto fixo de cenas (exemplos 0 a 45) e compara cada resultado, pixel a pixel,
 com o que foi gravado por `gerar`. Serve para provar que uma refatoração não
 mudou nenhum pixel.
 
@@ -37,7 +37,7 @@ MANIFESTO = BASE / "manifesto.json"
 TEMPOS = BASE / "tempos.json"
 
 # Ids da lista achatada de docs/exemplos.json (posição na lista, a partir de 0).
-EXEMPLOS = range(9, 46)
+EXEMPLOS = range(0, 46)
 ANIMADOS = range(36, 41)
 INSTANTES = (0.0, 2.5, 5.0)  # segundos, para os exemplos animados
 
