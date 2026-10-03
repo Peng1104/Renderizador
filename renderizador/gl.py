@@ -34,6 +34,9 @@ VerticeProjetado = tuple[float, float, float, float]
 # Cone, Cylinder) geram e GL._draw_mesh consome.
 Malha = tuple[npt.NDArray[np.float64], npt.NDArray[np.float64], npt.NDArray[np.int64]]
 
+# Textura de uma malha: (cadeia de mipmaps, coordenadas UV (N, 2), uma por vértice).
+Textura = tuple[list[npt.NDArray[np.uint8]], npt.NDArray[np.float64]]
+
 # Relógio dos TimeSensors, em segundos. Fica no módulo, e não na classe, para
 # que testes possam fixar o instante renderizado trocando `gl._relogio`.
 _relogio: Callable[[], float] = time.time
@@ -152,6 +155,12 @@ class GL:
     # (esfera, cone, cilindro) e faixas de latitude da esfera.
     _SEGMENTOS: ClassVar[int] = 48
     _SPHERE_FAIXAS: ClassVar[int] = 24
+
+    # UV dos 4 cantos de cada face do Box, na ordem de GL._box_mesh (canto
+    # inferior esquerdo, inferior direito, superior direito, superior esquerdo,
+    # vistos de fora): a textura inteira em cada face.
+    _BOX_FACE_UV: ClassVar[npt.NDArray[np.float64]] = np.array(
+        [[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]])
 
     # Cache das malhas das primitivas, por (tipo, parâmetros), para não
     # retesselar a cada frame (ver GL._cached_mesh).
@@ -1186,6 +1195,56 @@ class GL:
         return int(np.clip(nivel, 0, n_niveis - 1))
 
     @staticmethod
+    def _sample_texture(pesos: npt.NDArray[np.float64],
+                        verts: tuple[VerticeProjetado, VerticeProjetado, VerticeProjetado],
+                        uvs: tuple[npt.NDArray[np.float64], npt.NDArray[np.float64],
+                                   npt.NDArray[np.float64]],
+                        mipmaps: list[npt.NDArray[np.uint8]]) -> npt.NDArray[np.uint8]:
+        """
+        Amostra a textura nas subamostras cobertas de um triângulo.
+
+        Amostragem nearest-neighbor no nível de mipmap escolhido por
+        `GL._select_mip_level`, com wrap (repeat) das coordenadas UV fora de
+        [0, 1], que é o padrão X3D (`repeatS`/`repeatT` = TRUE).
+
+        Parameters
+        ----------
+        pesos : NDArray[float64]
+            Pesos baricêntricos perspectiva-corretos das subamostras, array
+            (3, K), devolvidos por `GL._triangle_coverage`.
+        verts : tuple[VerticeProjetado, VerticeProjetado, VerticeProjetado]
+            Vértices do triângulo, em coordenadas de tela.
+        uvs : tuple[NDArray[float64], NDArray[float64], NDArray[float64]]
+            Coordenada de textura [u, v] de cada vértice.
+        mipmaps : list[NDArray[uint8]]
+            Cadeia de mipmaps da textura (ver `GL._get_texture_mipmaps`).
+
+        Returns
+        -------
+        NDArray[uint8]
+            Cor RGB (K, 3) da textura em cada subamostra.
+        """
+        (x0, y0, *_), (x1, y1, *_), (x2, y2, *_) = verts
+        uv0, uv1, uv2 = uvs
+        uv = pesos[0][:, None] * uv0 + pesos[1][:, None] * uv1 + pesos[2][:, None] * uv2
+
+        largura0, altura0 = mipmaps[0].shape[0], mipmaps[0].shape[1]
+        nivel = GL._select_mip_level(x0, y0, x1, y1, x2, y2, uv0, uv1, uv2,
+                                     largura0, altura0, len(mipmaps))
+        textura = mipmaps[nivel]
+        largura, altura = textura.shape[0], textura.shape[1]
+
+        u = uv[:, 0] % 1.0
+        v = uv[:, 1] % 1.0
+
+        tx = np.clip((u * largura).astype(np.int64), 0, largura - 1)
+        # V=0 no X3D é a base da textura, mas a linha 0 da imagem (após o
+        # transpose de GPU.load_texture) é o topo, daí o (1 - v).
+        ty = np.clip(((1.0 - v) * altura).astype(np.int64), 0, altura - 1)
+
+        return textura[tx, ty, :3]
+
+    @staticmethod
     def _scan_triangle_textured(v0: VerticeProjetado, uv0: npt.NDArray[np.float64],
                                 v1: VerticeProjetado, uv1: npt.NDArray[np.float64],
                                 v2: VerticeProjetado, uv2: npt.NDArray[np.float64],
@@ -1244,27 +1303,9 @@ class GL:
 
         ys, xs, sy, sx, pesos = cobertura
 
-        uv = pesos[0][:, None] * uv0 + pesos[1][:, None] * uv1 + pesos[2][:, None] * uv2
+        cor = GL._sample_texture(pesos, (v0, v1, v2), (uv0, uv1, uv2), mipmaps)
 
-        x0, y0 = v0[0], v0[1]
-        x1, y1 = v1[0], v1[1]
-        x2, y2 = v2[0], v2[1]
-
-        largura0, altura0 = mipmaps[0].shape[0], mipmaps[0].shape[1]
-        nivel = GL._select_mip_level(x0, y0, x1, y1, x2, y2, uv0, uv1, uv2,
-                                     largura0, altura0, len(mipmaps))
-        textura = mipmaps[nivel]
-        largura, altura = textura.shape[0], textura.shape[1]
-
-        u = uv[:, 0] % 1.0
-        v = uv[:, 1] % 1.0
-
-        tx = np.clip((u * largura).astype(np.int64), 0, largura - 1)
-        # V=0 no X3D é a base da textura, mas a linha 0 da imagem (após o
-        # transpose de GPU.load_texture) é o topo, daí o (1 - v).
-        ty = np.clip(((1.0 - v) * altura).astype(np.int64), 0, altura - 1)
-
-        GL._blend_write(ys, xs, sy, sx, textura[tx, ty, :3], alpha)
+        GL._blend_write(ys, xs, sy, sx, cor, alpha)
 
     @staticmethod
     def _get_texture(current_texture: list[str]) -> npt.NDArray[np.uint8] | None:
@@ -2544,7 +2585,8 @@ class GL:
 
     @staticmethod
     def _shade(pos: npt.NDArray[np.float64], normal: npt.NDArray[np.float64],
-               colors: Colors) -> npt.NDArray[np.float64]:
+               colors: Colors, difusa: npt.NDArray[np.float64] | None = None
+               ) -> npt.NDArray[np.float64]:
         r"""
         Calcula a cor iluminada de pontos de uma superfície (modelo de Phong).
 
@@ -2570,6 +2612,10 @@ class GL:
             Normais unitárias (N, 3) em coordenadas de mundo.
         colors : Colors
             Cores resolvidas do Appearance/Material do nó.
+        difusa : NDArray[float64] or None, optional
+            Cor difusa (N, 3) de cada ponto, em [0, 1], no lugar de
+            `colors["diffuseColor"]` (é assim que uma textura entra: ela
+            substitui a difusa do material).
 
         Returns
         -------
@@ -2581,7 +2627,8 @@ class GL:
         if not GL.lights:
             return resultado
 
-        difusa = np.asarray(colors["diffuseColor"], dtype=np.float64)
+        if difusa is None:
+            difusa = np.asarray(colors["diffuseColor"], dtype=np.float64)
         especular = np.asarray(colors["specularColor"], dtype=np.float64)
         expoente = colors["shininess"] * 128.0
         para_camera = GL.camera_position - pos
@@ -2606,7 +2653,7 @@ class GL:
                            pos: npt.NDArray[np.float64], normal: npt.NDArray[np.float64],
                            arestas: npt.NDArray[np.float64] | None,
                            bbox: tuple[int, int, int, int] | None, colors: Colors,
-                           alpha: float) -> None:
+                           alpha: float, textura: Textura | None = None) -> None:
         """
         Varre um triângulo calculando a iluminação em cada subamostra (Phong shading).
 
@@ -2631,6 +2678,9 @@ class GL:
             Cores resolvidas do Appearance/Material do nó.
         alpha : float
             Opacidade da geometria em [0, 1].
+        textura : Textura or None, optional
+            Textura do triângulo já com os UVs dos três vértices (array
+            (3, 2)); se dada, a cor amostrada substitui a difusa do material.
 
         Returns
         -------
@@ -2645,9 +2695,15 @@ class GL:
 
         ys, xs, sy, sx, pesos = cobertura
 
+        difusa = None
+        if textura is not None:
+            mipmaps, uv3 = textura
+            difusa = GL._sample_texture(pesos, (v0, v1, v2), (uv3[0], uv3[1], uv3[2]),
+                                        mipmaps) / 255.0
+
         n = pesos.T @ normal
         n /= np.maximum(np.linalg.norm(n, axis=1, keepdims=True), 1e-12)
-        cor = GL._shade(pesos.T @ pos, n, colors)
+        cor = GL._shade(pesos.T @ pos, n, colors, difusa)
         cor_rgb8 = np.clip(GL._round(cor * 255), 0, 255).astype(np.uint8)
 
         GL._blend_write(ys, xs, sy, sx, cor_rgb8, alpha)
@@ -2658,13 +2714,15 @@ class GL:
                         i2: npt.NDArray[np.int64],
                         arestas_l: list[npt.NDArray[np.float64] | None],
                         bboxes: list[tuple[int, int, int, int] | None], colors: Colors,
-                        normais: npt.NDArray[np.float64] | None = None) -> None:
+                        normais: npt.NDArray[np.float64] | None = None,
+                        textura: Textura | None = None) -> None:
         """
         Preenche triângulos já projetados com a cor do material, iluminada se houver luzes.
 
-        Sem luzes ativas, preenche flat com `colors["emissiveColor"]`. Com
-        luzes, sombreia por subamostra (`GL._scan_triangle_lit`), usando as
-        normais por vértice se dadas e, senão, a normal de cada face.
+        Sem luzes ativas, preenche flat com `colors["emissiveColor"]` (ou com
+        a textura, se dada). Com luzes, sombreia por subamostra
+        (`GL._scan_triangle_lit`), usando as normais por vértice se dadas e,
+        senão, a normal de cada face.
 
         Parameters
         ----------
@@ -2683,6 +2741,45 @@ class GL:
         normais : NDArray[float64] or None, optional
             Normais (N, 3) em coordenadas de objeto, uma por vértice; se
             None, usa-se a normal plana de cada triângulo.
+        textura : Textura or None, optional
+            Mipmaps e UVs por vértice; se dada, a textura substitui a cor
+            do material (a difusa, quando há luz).
+
+        Returns
+        -------
+        None
+            Escreve em GL.ms_buffer; não há retorno.
+        """
+        if GL.lights:
+            GL._fill_lit(posicoes, verts, (i0, i1, i2), arestas_l, bboxes, colors,
+                         normais, textura)
+        else:
+            GL._fill_unlit(verts, (i0, i1, i2), arestas_l, bboxes, colors, textura)
+
+    @staticmethod
+    def _fill_unlit(verts: list[VerticeProjetado],
+                    tri: tuple[npt.NDArray[np.int64], npt.NDArray[np.int64],
+                               npt.NDArray[np.int64]],
+                    arestas_l: list[npt.NDArray[np.float64] | None],
+                    bboxes: list[tuple[int, int, int, int] | None], colors: Colors,
+                    textura: Textura | None) -> None:
+        """
+        Preenche triângulos sem luz: textura se houver, senão a cor emissiva flat.
+
+        Parameters
+        ----------
+        verts : list[VerticeProjetado]
+            Vértices projetados.
+        tri : tuple[NDArray[int64], NDArray[int64], NDArray[int64]]
+            Índices dos três vértices de cada triângulo.
+        arestas_l : list[NDArray[float64] or None]
+            Arestas de cada triângulo.
+        bboxes : list[tuple[int, int, int, int] or None]
+            Bounding box de cada triângulo.
+        colors : Colors
+            Cores resolvidas do Appearance/Material do nó.
+        textura : Textura or None
+            Mipmaps e UVs por vértice, ou None para preencher flat.
 
         Returns
         -------
@@ -2690,34 +2787,82 @@ class GL:
             Escreve em GL.ms_buffer; não há retorno.
         """
         alpha = 1.0 - colors["transparency"]
+        idx0: list[int] = tri[0].tolist()
+        idx1: list[int] = tri[1].tolist()
+        idx2: list[int] = tri[2].tolist()
+
+        if textura is not None:
+            mipmaps, uv = textura
+            for t, (a, b, c) in enumerate(zip(idx0, idx1, idx2)):
+                GL._scan_triangle_textured(verts[a], uv[a], verts[b], uv[b], verts[c], uv[c],
+                                           mipmaps, arestas_l[t], bboxes[t], alpha)
+            return
+
+        cor = GL._to_rgb8(colors["emissiveColor"])
+        for t, (a, b, c) in enumerate(zip(idx0, idx1, idx2)):
+            GL._scan_triangle_depth(verts[a], verts[b], verts[c],
+                                    arestas_l[t], bboxes[t], cor, alpha)
+
+    @staticmethod
+    def _fill_lit(posicoes: npt.ArrayLike, verts: list[VerticeProjetado],
+                  tri: tuple[npt.NDArray[np.int64], npt.NDArray[np.int64],
+                             npt.NDArray[np.int64]],
+                  arestas_l: list[npt.NDArray[np.float64] | None],
+                  bboxes: list[tuple[int, int, int, int] | None], colors: Colors,
+                  normais: npt.NDArray[np.float64] | None, textura: Textura | None) -> None:
+        """
+        Preenche triângulos com iluminação Phong por subamostra.
+
+        Parameters
+        ----------
+        posicoes : ArrayLike
+            Vértices em coordenadas de objeto, [x0, y0, z0, x1, ...] ou (N, 3).
+        verts : list[VerticeProjetado]
+            Vértices projetados.
+        tri : tuple[NDArray[int64], NDArray[int64], NDArray[int64]]
+            Índices dos três vértices de cada triângulo.
+        arestas_l : list[NDArray[float64] or None]
+            Arestas de cada triângulo.
+        bboxes : list[tuple[int, int, int, int] or None]
+            Bounding box de cada triângulo.
+        colors : Colors
+            Cores resolvidas do Appearance/Material do nó.
+        normais : NDArray[float64] or None
+            Normais por vértice em coordenadas de objeto, ou None para usar a
+            normal plana de cada triângulo.
+        textura : Textura or None
+            Mipmaps e UVs por vértice; se dada, a cor amostrada substitui a
+            difusa do material.
+
+        Returns
+        -------
+        None
+            Escreve em GL.ms_buffer; não há retorno.
+        """
+        alpha = 1.0 - colors["transparency"]
+        i0, i1, i2 = tri
         idx0: list[int] = i0.tolist()
         idx1: list[int] = i1.tolist()
         idx2: list[int] = i2.tolist()
 
-        if not GL.lights:
-            cor = GL._to_rgb8(colors["emissiveColor"])
-            for t, (a, b, c) in enumerate(zip(idx0, idx1, idx2)):
-                GL._scan_triangle_depth(verts[a], verts[b], verts[c],
-                                        arestas_l[t], bboxes[t], cor, alpha)
-            return
-
         mundo, n_mundo = GL._to_world(np.asarray(posicoes, dtype=np.float64).reshape(-1, 3),
                                       normais)
-        tri = np.stack([i0, i1, i2], axis=1)
+        indices = np.stack([i0, i1, i2], axis=1)
         if n_mundo is None:
             n_face = np.cross(mundo[i1] - mundo[i0], mundo[i2] - mundo[i0])
             n_face /= np.maximum(np.linalg.norm(n_face, axis=1, keepdims=True), 1e-12)
             n_tri = np.repeat(n_face[:, None, :], 3, axis=1)
         else:
-            n_tri = n_mundo[tri]
-        pos_tri = mundo[tri]
+            n_tri = n_mundo[indices]
+        pos_tri = mundo[indices]
 
         for t, (a, b, c) in enumerate(zip(idx0, idx1, idx2)):
+            tex = (textura[0], textura[1][indices[t]]) if textura is not None else None
             GL._scan_triangle_lit(verts[a], verts[b], verts[c], pos_tri[t], n_tri[t],
-                                  arestas_l[t], bboxes[t], colors, alpha)
+                                  arestas_l[t], bboxes[t], colors, alpha, tex)
 
     @staticmethod
-    def _draw_mesh(malha: Malha, colors: Colors) -> None:
+    def _draw_mesh(malha: Malha, colors: Colors, textura: Textura | None = None) -> None:
         """
         Projeta, descarta faces de costas e rasteriza uma malha de triângulos indexada.
 
@@ -2733,6 +2878,8 @@ class GL:
             Posições (em coordenadas de objeto), normais e triângulos.
         colors : Colors
             Cores resolvidas do Appearance/Material do nó.
+        textura : Textura or None, optional
+            Mipmaps e UVs por vértice da malha, se tiver textura.
 
         Returns
         -------
@@ -2752,10 +2899,12 @@ class GL:
         verts: list[VerticeProjetado] = list(
             zip(tela_x.tolist(), tela_y.tolist(), tela_w.tolist(), tela_z.tolist()))
         arestas_l, bboxes = GL._prepare_edges_and_bbox(tela_x, tela_y, i0, i1, i2)
-        GL._fill_triangles(posicoes, verts, i0, i1, i2, arestas_l, bboxes, colors, normais)
+        GL._fill_triangles(posicoes, verts, i0, i1, i2, arestas_l, bboxes, colors, normais,
+                           textura)
 
     @staticmethod
-    def box(size: list[float], colors: Colors) -> None:
+    def box(size: list[float], colors: Colors, current_texture: list[str] | None = None
+            ) -> None:
         """
         Renderiza Box: um paralelepípedo centrado na origem local.
 
@@ -2766,6 +2915,10 @@ class GL:
             valor deve ser maior que zero.
         colors : Colors
             Cores resolvidas do Appearance/Material do nó.
+        current_texture : list[str] or None, optional
+            Caminho(s) da textura atual do Appearance, se houver. Cada face
+            mostra a textura inteira, com U para a direita e V para cima
+            vistos de fora (mapeamento X3D do Box).
 
         Returns
         -------
@@ -2775,7 +2928,9 @@ class GL:
         """
         x, y, z = size
         malha = GL._cached_mesh(("box", x, y, z), lambda: GL._box_mesh((x, y, z)))
-        GL._draw_mesh(malha, colors)
+        mipmaps = GL._get_texture_mipmaps(current_texture) if current_texture else None
+        textura = (mipmaps, np.tile(GL._BOX_FACE_UV, (6, 1))) if mipmaps else None
+        GL._draw_mesh(malha, colors, textura)
 
     @staticmethod
     def sphere(radius: float, colors: Colors) -> None:

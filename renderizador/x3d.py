@@ -863,6 +863,7 @@ class Shape(X3DShapeNode):
         """
         Rotina de renderização.
         """
+        X3D.current_texture = []  # a textura vale só para a Shape cuja Appearance a define
         if self.appearance:
             self.appearance.render()
         if self.geometry:
@@ -1277,7 +1278,8 @@ class Box(X3DGeometryNode):
 
         colors = get_colors(appearance)
         if self.size:
-            X3D.renderer["Box"](size=self.size, colors=colors)
+            X3D.renderer["Box"](size=self.size, colors=colors,
+                                current_texture=X3D.current_texture)
 
 
 class Sphere(X3DGeometryNode):
