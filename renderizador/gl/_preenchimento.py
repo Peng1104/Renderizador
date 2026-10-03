@@ -8,6 +8,7 @@ import numpy.typing as npt
 from ._arestas import prepare_edges_and_bbox
 from ._cores import to_rgb8
 from ._estado import estado
+from ._lote import fill_lit_batch
 from ._projecao import front_facing_mask, project_points, to_world
 from ._texturas import get_texture_mipmaps
 from ._tipos import Colors, Malha, Textura, VerticeProjetado
@@ -369,6 +370,10 @@ def fill_lit(posicoes: npt.ArrayLike, verts: list[VerticeProjetado],
     else:
         n_tri = n_mundo[indices]
     pos_tri = mundo[indices]
+
+    if textura is None and alpha >= 1.0:
+        fill_lit_batch(np.array(verts), tri, pos_tri, n_tri, colors)
+        return
 
     for t, (a, b, c) in enumerate(zip(idx0, idx1, idx2)):
         tex = (textura[0], textura[1][indices[t]]) if textura is not None else None

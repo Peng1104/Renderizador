@@ -104,6 +104,7 @@ def front_facing_mask(tela_x: npt.NDArray[np.float64], tela_y: npt.NDArray[np.fl
     x2, y2 = tela_x[i2], tela_y[i2]
 
     area_assinada = (x1 - x0) * (y2 - y0) - (y1 - y0) * (x2 - x0)
+
     return area_assinada < 0
 
 
@@ -133,8 +134,11 @@ def to_world(posicoes: npt.NDArray[np.float64], normais: npt.NDArray[np.float64]
     """
     modelo = estado.transform_stack[-1]
     mundo = posicoes @ modelo[:3, :3].T + modelo[:3, 3]
+
     if normais is None:
         return mundo, None
+
     n = normais @ np.linalg.inv(modelo)[:3, :3]
     comprimento = np.linalg.norm(n, axis=1, keepdims=True)
+
     return mundo, n / np.where(comprimento == 0, 1.0, comprimento)
