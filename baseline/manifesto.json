@@ -1,0 +1,470 @@
+{
+  "09_um_triangulo": {
+    "arquivo": "09_um_triangulo000.png",
+    "forma": [
+      200,
+      300,
+      3
+    ],
+    "sha256": "17fc602871d3cb5cfb866f08b48f552750485f2bd0ef4d31e1201865e675eb64"
+  },
+  "10_varios_triangs": {
+    "arquivo": "10_varios_triangs000.png",
+    "forma": [
+      200,
+      300,
+      3
+    ],
+    "sha256": "cb64f6dcc7b46e9a8396018ee47fa960a83f9a60bd58c7d57f5fb20fd04fa82d"
+  },
+  "11_zoom": {
+    "arquivo": "11_zoom000.png",
+    "forma": [
+      200,
+      300,
+      3
+    ],
+    "sha256": "1312bc7d68cb0cf1958baca9545c2def0529b68d38c5784bb353169d1451aecb"
+  },
+  "12_tiras": {
+    "arquivo": "12_tiras000.png",
+    "forma": [
+      200,
+      300,
+      3
+    ],
+    "sha256": "7cdc595552cf115df90ad13bf9d92e094a3aa91aa11e91cf2cf966079e0eb2f1"
+  },
+  "13_letras": {
+    "arquivo": "13_letras000.png",
+    "forma": [
+      200,
+      300,
+      3
+    ],
+    "sha256": "1fa3bc0c4cbae96206c847708ad975da99f93ae0e4e03d5b325ccf720398afd3"
+  },
+  "14_leques": {
+    "arquivo": "14_leques000.png",
+    "forma": [
+      200,
+      300,
+      3
+    ],
+    "sha256": "869f323d25790bbfec652f469e60e5189c556f6e25f1d1da3e58c49c92396463"
+  },
+  "15_vertices10": {
+    "arquivo": "15_vertices10000.png",
+    "forma": [
+      200,
+      300,
+      3
+    ],
+    "sha256": "ec939c42d798b0e1d15d022c7f36e8390a6b406f0be0aba84a89c7a05b89e83c"
+  },
+  "16_estrela": {
+    "arquivo": "16_estrela000.png",
+    "forma": [
+      200,
+      300,
+      3
+    ],
+    "sha256": "b6fbf64e3f3a4e81363743c6a5c1b39f5cfc78dfd6e4c5707f14fccf75e30bbc"
+  },
+  "17_bound500": {
+    "arquivo": "17_bound500000.png",
+    "forma": [
+      200,
+      300,
+      3
+    ],
+    "sha256": "847997cc31d1d559e770214bb1f1053c3cb0eba6106895d996014bf30b670417"
+  },
+  "18_avatar": {
+    "arquivo": "18_avatar000.png",
+    "forma": [
+      200,
+      300,
+      3
+    ],
+    "sha256": "e161ba75fa2029d1df3917f9481e131579b7c9847251d0b47f301df3bc023dfc"
+  },
+  "19_girando": {
+    "arquivo": "19_girando000.png",
+    "forma": [
+      200,
+      300,
+      3
+    ],
+    "sha256": "7ca65e46512fef34814448f58d13ab580c8b2fe88c789b63cfc8011dbeed3404"
+  },
+  "20_quadrado": {
+    "arquivo": "20_quadrado000.png",
+    "forma": [
+      200,
+      300,
+      3
+    ],
+    "sha256": "0389269b6e3ecae4fd4e1e52cdcea87ca51b901f0a0d706cb2ffb124408cad74"
+  },
+  "21_flechas": {
+    "arquivo": "21_flechas000.png",
+    "forma": [
+      200,
+      300,
+      3
+    ],
+    "sha256": "0fbeb787b96b3c5e25b8aaad028c9f1247b809ebff640881460d23cab6a347e4"
+  },
+  "22_textura": {
+    "arquivo": "22_textura000.png",
+    "forma": [
+      200,
+      300,
+      3
+    ],
+    "sha256": "89eb43b8f1505cfa77e3f171337ae78d92eddc9a83a397709ad300791f866aa2"
+  },
+  "23_texturas": {
+    "arquivo": "23_texturas000.png",
+    "forma": [
+      200,
+      300,
+      3
+    ],
+    "sha256": "8cd68f43348b63732bca9a2c5f2158e7fd1796fddcdefb986309602bcb078604"
+  },
+  "24_retangulos": {
+    "arquivo": "24_retangulos000.png",
+    "forma": [
+      200,
+      300,
+      3
+    ],
+    "sha256": "f01062a98c20c8dd26ce098fe783a601b567bc63bfbaff3ef87896efea338b54"
+  },
+  "25_transparente": {
+    "arquivo": "25_transparente000.png",
+    "forma": [
+      200,
+      300,
+      3
+    ],
+    "sha256": "9a033b4d84cb8fe754c28f9562def3a4b24d91aa8a0f0f84318c1d0e26d3eee6"
+  },
+  "26_tri_color": {
+    "arquivo": "26_tri_color000.png",
+    "forma": [
+      40,
+      60,
+      3
+    ],
+    "sha256": "0de75cfe061661423c6ff7900e0a1edbd581a6226d938d8eb15c0058ca769764"
+  },
+  "27_tri_textur": {
+    "arquivo": "27_tri_textur000.png",
+    "forma": [
+      40,
+      60,
+      3
+    ],
+    "sha256": "94a096c3d2f7c3ecc56a9cfb59734f5aa7c5d51ffcab3023fc42a3a869640106"
+  },
+  "28_dois_tri": {
+    "arquivo": "28_dois_tri000.png",
+    "forma": [
+      10,
+      12,
+      3
+    ],
+    "sha256": "787c4b267fa933ed02b1080f8a5637be00fbe98fa5da1a27feb988aea4a16660"
+  },
+  "29_tri_trans": {
+    "arquivo": "29_tri_trans000.png",
+    "forma": [
+      10,
+      12,
+      3
+    ],
+    "sha256": "8607fdc3344930d0104496d41572a37053b0356f299fb9b3cb953ec2753e23b6"
+  },
+  "30_difusos": {
+    "arquivo": "30_difusos000.png",
+    "forma": [
+      200,
+      300,
+      3
+    ],
+    "sha256": "4e7d987b7390a5843822a11e8f99780058973590d218b717aa3bc05c9247f3a7"
+  },
+  "31_mineiro": {
+    "arquivo": "31_mineiro000.png",
+    "forma": [
+      400,
+      600,
+      3
+    ],
+    "sha256": "3de59fba491fc30c95c9d8ea66aac07bd0c05a9b26a93740301d65d4c5390dd6"
+  },
+  "32_senoide_difusa": {
+    "arquivo": "32_senoide_difusa000.png",
+    "forma": [
+      400,
+      600,
+      3
+    ],
+    "sha256": "1cfcc5a05c48b6020fa63ad48f59943378b0e6f4f3385fc9a7bb1354971df0c5"
+  },
+  "33_senoide_especular": {
+    "arquivo": "33_senoide_especular000.png",
+    "forma": [
+      400,
+      600,
+      3
+    ],
+    "sha256": "89cd14d1b32df6c016f2da7d3e884857b0a37a777ff072c413922f4c03e2c62b"
+  },
+  "34_teapot": {
+    "arquivo": "34_teapot000.png",
+    "forma": [
+      100,
+      150,
+      3
+    ],
+    "sha256": "1000cfc765d63c50bbd64fc5cc71c998588eab63c8ae86faac34992f1b09eb4a"
+  },
+  "35_coelho": {
+    "arquivo": "35_coelho000.png",
+    "forma": [
+      400,
+      600,
+      3
+    ],
+    "sha256": "253b453b6f76c09258c8984d04df06e8d8a533099863ab73f233aaafe994a0fb"
+  },
+  "36_onda_t0": {
+    "arquivo": "36_onda_t0000.png",
+    "forma": [
+      200,
+      300,
+      3
+    ],
+    "sha256": "272532d2f1a6e72bc723644a642d2cc4f4b016e51e83e92a59863b956ad332e9"
+  },
+  "36_onda_t2.5": {
+    "arquivo": "36_onda_t2p5000.png",
+    "forma": [
+      200,
+      300,
+      3
+    ],
+    "sha256": "cc8bc0ca141c5bc1d197e307738599245dedcfdb5c75020fa22bea2e4bd984fe"
+  },
+  "36_onda_t5": {
+    "arquivo": "36_onda_t5000.png",
+    "forma": [
+      200,
+      300,
+      3
+    ],
+    "sha256": "7bec1535ec5bc39a56cac19838a77a314a832b7d6e33ecb0cc1fc93fd49d7358"
+  },
+  "37_piramide_t0": {
+    "arquivo": "37_piramide_t0000.png",
+    "forma": [
+      200,
+      300,
+      3
+    ],
+    "sha256": "8d942b898c1cb86c45e147f6639e06df0cf1e0c81280b73db14bb6a969271742"
+  },
+  "37_piramide_t2.5": {
+    "arquivo": "37_piramide_t2p5000.png",
+    "forma": [
+      200,
+      300,
+      3
+    ],
+    "sha256": "2b95b88bacfd7ae11649d772646eef5cfd9118b2229e07c7e189590bbe85809f"
+  },
+  "37_piramide_t5": {
+    "arquivo": "37_piramide_t5000.png",
+    "forma": [
+      200,
+      300,
+      3
+    ],
+    "sha256": "90303efac85bab0d7c95ef802166ea0da736c929f4b0460530eac8699a02538b"
+  },
+  "38_voltas_t0": {
+    "arquivo": "38_voltas_t0000.png",
+    "forma": [
+      200,
+      200,
+      3
+    ],
+    "sha256": "3b11b84b9bb90e6af67d5332c3c0d6bb437a12cb590cb40fd41d72065d37ab73"
+  },
+  "38_voltas_t2.5": {
+    "arquivo": "38_voltas_t2p5000.png",
+    "forma": [
+      200,
+      200,
+      3
+    ],
+    "sha256": "af44380b6a075e5e074c4bc8579d919a313adca88645fd39aa116d1d4ea10c6e"
+  },
+  "38_voltas_t5": {
+    "arquivo": "38_voltas_t5000.png",
+    "forma": [
+      200,
+      200,
+      3
+    ],
+    "sha256": "0e933aee2ea8e8f47e1179285ea597d26194ea81e2ed069741a3699869619195"
+  },
+  "39_danca_t0": {
+    "arquivo": "39_danca_t0000.png",
+    "forma": [
+      100,
+      150,
+      3
+    ],
+    "sha256": "e172fe71dd1efa66a250fa13e51e0006af546b766d8f80e4d247011c61f4ab36"
+  },
+  "39_danca_t2.5": {
+    "arquivo": "39_danca_t2p5000.png",
+    "forma": [
+      100,
+      150,
+      3
+    ],
+    "sha256": "370e2267e10bbcab933b0d6f2fb8f91169f7143c31a3c8ecc88d5388a5b85be8"
+  },
+  "39_danca_t5": {
+    "arquivo": "39_danca_t5000.png",
+    "forma": [
+      100,
+      150,
+      3
+    ],
+    "sha256": "6f897234f6798f96f399f1b0691d6c917357a47337cb4c91ecb50f321ebb6679"
+  },
+  "40_avatar_animado_t0": {
+    "arquivo": "40_avatar_animado_t0000.png",
+    "forma": [
+      100,
+      150,
+      3
+    ],
+    "sha256": "5d5fc750c8920b6cd70b5eda54057a98477a3d81d9fb0a99cba80b59f2ab65c7"
+  },
+  "40_avatar_animado_t2.5": {
+    "arquivo": "40_avatar_animado_t2p5000.png",
+    "forma": [
+      100,
+      150,
+      3
+    ],
+    "sha256": "55d1df92f475d033772d3f3f1613a8134cad7d568ce4b29f3f540c9cc4038959"
+  },
+  "40_avatar_animado_t5": {
+    "arquivo": "40_avatar_animado_t5000.png",
+    "forma": [
+      100,
+      150,
+      3
+    ],
+    "sha256": "09c9d1563e5c3d3fab2190e7bedd20f7f2338c0eff25b2a98d54e5f443770052"
+  },
+  "41_duas": {
+    "arquivo": "41_duas000.png",
+    "forma": [
+      200,
+      300,
+      3
+    ],
+    "sha256": "73ae4b8d66afdac195b40779b115bcbc8add5397cf51ad677c06cfbea35711bd"
+  },
+  "42_outras_duas": {
+    "arquivo": "42_outras_duas000.png",
+    "forma": [
+      200,
+      300,
+      3
+    ],
+    "sha256": "31ee2c4dcb8a30cdbcd5d4be817a8a840ddf6d3e7e32c0eb136c2eff3e81495e"
+  },
+  "43_caixas": {
+    "arquivo": "43_caixas000.png",
+    "forma": [
+      200,
+      300,
+      3
+    ],
+    "sha256": "bee2aee35169913d77aa5591065a532bdf94c498c387bf37c08b23d2d5e01bac"
+  },
+  "44_esferas": {
+    "arquivo": "44_esferas000.png",
+    "forma": [
+      100,
+      150,
+      3
+    ],
+    "sha256": "c2d2e0be90ccec134b48165b61cc494198a2655d80d9c6ba56ce29258c173984"
+  },
+  "45_cubo": {
+    "arquivo": "45_cubo000.png",
+    "forma": [
+      100,
+      150,
+      3
+    ],
+    "sha256": "58f82b31a0d6e7040d20e2d4b550d3bd8da3052746dee86463a466d3e0eeb0f5"
+  },
+  "cena_textura_baixo_semluz": {
+    "arquivo": "cena_textura_baixo_semluz000.png",
+    "forma": [
+      200,
+      450,
+      3
+    ],
+    "sha256": "dceaefb8f9efa811ff6b5fdd4b47d54ec708d32b8807f2a49e5e183dc3611fa6"
+  },
+  "cena_textura_lado_luz": {
+    "arquivo": "cena_textura_lado_luz000.png",
+    "forma": [
+      200,
+      450,
+      3
+    ],
+    "sha256": "e319f02f12396f487455f8d7fcdce5dc7c07fc55257b0ce0dfd6d2c4e9716b41"
+  },
+  "cena_textura_lado_semluz": {
+    "arquivo": "cena_textura_lado_semluz000.png",
+    "forma": [
+      200,
+      450,
+      3
+    ],
+    "sha256": "b0789b418db1beda9583748127ff9345e99522c32906ef805073daa3838e3822"
+  },
+  "cena_textura_topo_luz": {
+    "arquivo": "cena_textura_topo_luz000.png",
+    "forma": [
+      200,
+      450,
+      3
+    ],
+    "sha256": "e0a32f3184e9de2896b0e0e8aab50ce735577b3d934991712b607ad1bc1e91e8"
+  },
+  "cena_textura_topo_semluz": {
+    "arquivo": "cena_textura_topo_semluz000.png",
+    "forma": [
+      200,
+      450,
+      3
+    ],
+    "sha256": "4850b2fcce42ded0203a551b7e9e28ccd9892bf559331ebc4408a1c55eca879c"
+  }
+}

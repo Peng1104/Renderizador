@@ -1,0 +1,10 @@
+<X3D>
+ <Scene>
+  <Viewpoint position='0 0 9'/>
+  <NavigationInfo headlight='true'/>
+  <DirectionalLight direction='0.3 -0.5 -0.8' ambientIntensity='0.3'/>
+  <Transform translation='-3 0 0' rotation='1 0.5 0 0.8'><Shape><Appearance><Material diffuseColor='1 1 1'/><ImageTexture url='"insper.png"'/></Appearance><Sphere radius='1.2'/></Shape></Transform>
+  <Transform translation='0 0 0' rotation='1 0.5 0 0.8'><Shape><Appearance><Material diffuseColor='1 1 1'/><ImageTexture url='"insper.png"'/></Appearance><Cone bottomRadius='1.1' height='2.2'/></Shape></Transform>
+  <Transform translation='3 0 0' rotation='1 0.5 0 0.8'><Shape><Appearance><Material diffuseColor='1 1 1'/><ImageTexture url='"insper.png"'/></Appearance><Cylinder radius='1' height='2.2'/></Shape></Transform>
+ </Scene>
+</X3D>

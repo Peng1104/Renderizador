@@ -5,3 +5,7 @@ __pycache__/
 .venv/
 .ruff_cache/
 .claude/
+# baseline de regressão (ver baseline.py)
+baseline/imagens/
+baseline/atual/
+baseline/tempos.json
