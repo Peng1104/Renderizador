@@ -34,6 +34,10 @@ VerticeProjetado = tuple[float, float, float, float]
 # Cone, Cylinder) geram e GL._draw_mesh consome.
 Malha = tuple[npt.NDArray[np.float64], npt.NDArray[np.float64], npt.NDArray[np.int64]]
 
+# Relógio dos TimeSensors, em segundos. Fica no módulo, e não na classe, para
+# que testes possam fixar o instante renderizado trocando `gl._relogio`.
+_relogio: Callable[[], float] = time.time
+
 
 class Colors(TypedDict):
     """
@@ -140,6 +144,10 @@ class GL:
     # no vetor até o observador do termo especular.
     camera_position: ClassVar[npt.NDArray[np.float64]]
 
+    # Instante do primeiro TimeSensor avaliado, de onde todos os ciclos contam
+    # (None até lá e após GL.setup). O relógio em si é `_relogio`, no módulo.
+    _t0: ClassVar[float | None] = None
+
     # Resolução da tesselação das primitivas curvas: fatias ao redor do eixo
     # (esfera, cone, cilindro) e faixas de latitude da esfera.
     _SEGMENTOS: ClassVar[int] = 48
@@ -180,6 +188,7 @@ class GL:
         GL.transform_stack = [np.identity(4)]
         GL.lights = []
         GL.camera_position = np.zeros(3)
+        GL._t0 = None
         GL.ms_buffer = np.zeros(
             (height, width, GL.MSAA_AMOSTRAS, GL.MSAA_AMOSTRAS, 3), dtype=np.uint8)
         GL.depth_buffer = np.ones(
@@ -3009,7 +3018,9 @@ class GL:
         Returns
         -------
         float
-            Fração de tempo decorrida no ciclo atual, em [0, 1).
+            Fração de tempo decorrida no ciclo atual, em [0, 1) com `loop`.
+            Sem `loop`, cresce até 1.0 ao fim do primeiro ciclo e fica lá.
+            O tempo conta a partir da primeira avaliação de um TimeSensor.
         """
         # https://www.web3d.org/specifications/X3Dv4/ISO-IEC19775-1v4-IS/Part01/components/time.html#TimeSensor
         # Os nós TimeSensor podem ser usados para muitas finalidades, incluindo:
@@ -3021,16 +3032,75 @@ class GL:
         # cycleInterval segundos. O valor de cycleInterval deve ser maior que zero.
 
         # Deve retornar a fração de tempo passada em fraction_changed
+        agora = _relogio()
+        if GL._t0 is None:
+            GL._t0 = agora
 
-        # O print abaixo é só para vocês verificarem o funcionamento, DEVE SER REMOVIDO.
-        print("TimeSensor : cycleInterval = {0}".format(cycleInterval)) # imprime no terminal
-        print("TimeSensor : loop = {0}".format(loop))
+        decorrido = agora - GL._t0
+        if loop:
+            return (decorrido % cycleInterval) / cycleInterval
+        return min(decorrido / cycleInterval, 1.0)
 
-        # Esse método já está implementado para os alunos como exemplo
-        epoch = time.time()  # time in seconds since the epoch as a floating point number.
-        fraction_changed = (epoch % cycleInterval) / cycleInterval
+    @staticmethod
+    def _key_segment(key: list[float], fracao: float) -> tuple[int, float]:
+        """
+        Localiza o intervalo de chaves que contém uma fração.
 
-        return fraction_changed
+        Parameters
+        ----------
+        key : list[float]
+            Chaves em ordem crescente, com ao menos duas.
+        fracao : float
+            Fração dentro de `[key[0], key[-1]]`.
+
+        Returns
+        -------
+        int
+            Índice `i` do início do intervalo `[key[i], key[i + 1]]`.
+        float
+            Posição de `fracao` dentro do intervalo, em [0, 1].
+        """
+        chaves = np.asarray(key, dtype=np.float64)
+        i = int(np.clip(np.searchsorted(chaves, fracao, side="right") - 1, 0, len(chaves) - 2))
+        return i, (fracao - chaves[i]) / max(chaves[i + 1] - chaves[i], 1e-12)
+
+    @staticmethod
+    def _spline_derivatives(chaves: npt.NDArray[np.float64], valores: npt.NDArray[np.float64],
+                            fechado: bool) -> npt.NDArray[np.float64]:
+        """
+        Calcula a derivada (Catmull-Rom) do spline em cada chave.
+
+        É a diferença central em relação às chaves vizinhas, que para chaves
+        igualmente espaçadas dá a tangente $(v_{i+1} - v_{i-1}) / 2$ da spec.
+        Num spline aberto os extremos têm derivada nula. Num fechado, os
+        vizinhos dão a volta: o anterior à primeira chave é a penúltima, e o
+        posterior à última é a segunda.
+
+        Parameters
+        ----------
+        chaves : NDArray[float64]
+            Chaves, array (N,).
+        valores : NDArray[float64]
+            Vetores 3D de cada chave, array (N, 3).
+        fechado : bool
+            Se o spline é fechado (primeiro e último valores idênticos).
+
+        Returns
+        -------
+        NDArray[float64]
+            Derivada em relação à chave, array (N, 3).
+        """
+        derivadas = np.zeros_like(valores)
+        if not fechado:
+            derivadas[1:-1] = ((valores[2:] - valores[:-2])
+                               / np.maximum(chaves[2:] - chaves[:-2], 1e-12)[:, None])
+            return derivadas
+
+        mais, menos = np.roll(valores, -1, axis=0), np.roll(valores, 1, axis=0)
+        k_mais, k_menos = np.roll(chaves, -1), np.roll(chaves, 1)
+        menos[0], k_menos[0] = valores[-2], chaves[0] - (chaves[-1] - chaves[-2])
+        mais[-1], k_mais[-1] = valores[1], chaves[-1] + (chaves[1] - chaves[0])
+        return (mais - menos) / np.maximum(k_mais - k_menos, 1e-12)[:, None]
 
     @staticmethod
     def splinePositionInterpolator(set_fraction: float, key: list[float], keyValue: list[float],
@@ -3038,7 +3108,9 @@ class GL:
         """
         Interpola não linearmente entre uma lista de vetores 3D.
 
-        Ainda não implementado (stub) — ver comentário abaixo.
+        Usa a spline cúbica de Hermite com tangentes Catmull-Rom (ver
+        `GL._spline_derivatives`). Fora do intervalo das chaves, mantém o
+        primeiro ou o último valor.
 
         Parameters
         ----------
@@ -3067,17 +3139,80 @@ class GL:
         # quadros-chave no key. O campo closed especifica se o interpolador deve tratar a malha
         # como fechada, com uma transições da última chave para a primeira chave. Se os keyValues
         # na primeira e na última chave não forem idênticos, o campo closed será ignorado.
+        valores = np.asarray(keyValue, dtype=np.float64).reshape(-1, 3)
+        if len(key) == 0 or len(valores) != len(key):
+            return [0.0, 0.0, 0.0]
+        if len(key) == 1 or set_fraction <= key[0]:
+            return valores[0].tolist()
+        if set_fraction >= key[-1]:
+            return valores[-1].tolist()
 
-        # O print abaixo é só para vocês verificarem o funcionamento, DEVE SER REMOVIDO.
-        print("SplinePositionInterpolator : set_fraction = {0}".format(set_fraction))
-        print("SplinePositionInterpolator : key = {0}".format(key)) # imprime no terminal
-        print("SplinePositionInterpolator : keyValue = {0}".format(keyValue))
-        print("SplinePositionInterpolator : closed = {0}".format(closed))
+        chaves = np.asarray(key, dtype=np.float64)
+        fechado = closed and len(key) > 2 and bool(np.allclose(valores[0], valores[-1]))
+        derivadas = GL._spline_derivatives(chaves, valores, fechado)
 
-        # Abaixo está só um exemplo de como os dados podem ser calculados e transferidos
-        value_changed = [0.0, 0.0, 0.0]
-        
-        return value_changed
+        i, t = GL._key_segment(key, set_fraction)
+        dt = chaves[i + 1] - chaves[i]
+        h00, h10 = 2 * t**3 - 3 * t**2 + 1, t**3 - 2 * t**2 + t
+        h01, h11 = -2 * t**3 + 3 * t**2, t**3 - t**2
+
+        value_changed = (h00 * valores[i] + h10 * dt * derivadas[i]
+                         + h01 * valores[i + 1] + h11 * dt * derivadas[i + 1])
+        return value_changed.tolist()
+
+    @staticmethod
+    def _slerp(q0: npt.NDArray[np.float64], q1: npt.NDArray[np.float64], t: float
+               ) -> npt.NDArray[np.float64]:
+        """
+        Interpola esfericamente (slerp) entre dois quatérnios unitários, pelo caminho mais curto.
+
+        Parameters
+        ----------
+        q0, q1 : NDArray[float64]
+            Quatérnios unitários [w, x, y, z].
+        t : float
+            Posição entre `q0` (0) e `q1` (1).
+
+        Returns
+        -------
+        NDArray[float64]
+            Quatérnio unitário interpolado. Se os quatérnios são quase
+            paralelos, usa interpolação linear normalizada, que evita a
+            divisão por um seno quase nulo.
+        """
+        cosseno = float(np.dot(q0, q1))
+        if cosseno < 0:  # q e -q são a mesma rotação; escolhe o caminho curto
+            q1, cosseno = -q1, -cosseno
+
+        if cosseno > 0.9995:
+            q = q0 + t * (q1 - q0)
+            return q / np.linalg.norm(q)
+
+        angulo = math.acos(cosseno)
+        return (math.sin((1 - t) * angulo) * q0 + math.sin(t * angulo) * q1) / math.sin(angulo)
+
+    @staticmethod
+    def _quaternion_to_axis_angle(q: npt.NDArray[np.float64]) -> list[float]:
+        """
+        Converte um quatérnio unitário [w, x, y, z] para eixo e ângulo [x, y, z, t].
+
+        Parameters
+        ----------
+        q : NDArray[float64]
+            Quatérnio unitário [w, x, y, z].
+
+        Returns
+        -------
+        list[float]
+            Rotação [x, y, z, t], com t em radianos. Para rotação nula
+            devolve [0, 0, 1, 0].
+        """
+        w = float(np.clip(q[0], -1.0, 1.0))
+        seno_metade = math.sqrt(1.0 - w * w)
+        if seno_metade < 1e-9:
+            return [0.0, 0.0, 1.0, 0.0]
+        eixo = q[1:] / seno_metade
+        return [*eixo.tolist(), 2 * math.acos(w)]
 
     @staticmethod
     def orientationInterpolator(set_fraction: float, key: list[float],
@@ -3085,7 +3220,9 @@ class GL:
         """
         Interpola entre uma lista de valores de rotação específicos.
 
-        Ainda não implementado (stub) — ver comentário abaixo.
+        Converte cada rotação para quatérnio e faz slerp pelo caminho mais
+        curto (ver `GL._slerp`). Fora do intervalo das chaves, mantém a
+        primeira ou a última rotação.
 
         Parameters
         ----------
@@ -3113,16 +3250,18 @@ class GL:
         # dos valores em keyValue, a fração a ser interpolada vem de set_fraction que varia de
         # zeroa a um. O campo keyValue deve conter exatamente tantas rotações 3D quanto os
         # quadros-chave no key.
+        rotacoes = np.asarray(keyValue, dtype=np.float64).reshape(-1, 4)
+        if len(key) == 0 or len(rotacoes) != len(key):
+            return [0.0, 0.0, 1.0, 0.0]
+        if len(key) == 1 or set_fraction <= key[0]:
+            return rotacoes[0].tolist()
+        if set_fraction >= key[-1]:
+            return rotacoes[-1].tolist()
 
-        # O print abaixo é só para vocês verificarem o funcionamento, DEVE SER REMOVIDO.
-        print("OrientationInterpolator : set_fraction = {0}".format(set_fraction))
-        print("OrientationInterpolator : key = {0}".format(key)) # imprime no terminal
-        print("OrientationInterpolator : keyValue = {0}".format(keyValue))
-
-        # Abaixo está só um exemplo de como os dados podem ser calculados e transferidos
-        value_changed = [0.0, 0.0, 1.0, 0.0]
-
-        return value_changed
+        i, t = GL._key_segment(key, set_fraction)
+        q0 = GL._axis_angle_to_quaternion(rotacoes[i].tolist())
+        q1 = GL._axis_angle_to_quaternion(rotacoes[i + 1].tolist())
+        return GL._quaternion_to_axis_angle(GL._slerp(q0, q1, t))
 
     # Para o futuro (Não para versão atual do projeto.)
     def vertex_shader(self, shader: str) -> None:

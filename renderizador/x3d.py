@@ -462,6 +462,8 @@ class Scene:
         Parse do nó X3D.
         """
         self.children: list[object] = []
+        self.nodes_eventos: list[object] = []  # TimeSensors e interpoladores
+        self.routes: list[ROUTE] = []
         lights: list[DirectionalLight | PointLight] = []
         viewpoint: Viewpoint | None = None
         navigation_info: NavigationInfo | None = None
@@ -474,13 +476,13 @@ class Scene:
             elif child.tag == "Shape":
                 self.children.append(Shape(child))
             elif child.tag == "TimeSensor":
-                self.children.append(TimeSensor(child))
+                self.nodes_eventos.append(TimeSensor(child))
             elif child.tag == "SplinePositionInterpolator":
-                self.children.append(SplinePositionInterpolator(child))
+                self.nodes_eventos.append(SplinePositionInterpolator(child))
             elif child.tag == "OrientationInterpolator":
-                self.children.append(OrientationInterpolator(child))
+                self.nodes_eventos.append(OrientationInterpolator(child))
             elif child.tag == "ROUTE":
-                self.children.append(ROUTE(child))
+                self.routes.append(ROUTE(child))
             elif child.tag == "DirectionalLight":
                 lights.append(DirectionalLight(child))
             elif child.tag == "PointLight":
@@ -507,10 +509,44 @@ class Scene:
         if fog:  # garante que fog seja o último nó
             self.children.append(fog)
 
+    def _resolve_events(self, nome: str, feitos: set[str]) -> None:
+        """
+        Atualiza um nó nomeado depois dos eventos que chegam nele.
+
+        Antes de atualizar o nó, resolve recursivamente a origem de cada ROUTE
+        que chega nele e propaga o valor. Assim a cadeia relógio, interpolador
+        e Transform sai correta no mesmo frame, em qualquer ordem no arquivo.
+        Cada nó é resolvido uma única vez por frame, o que também impede
+        laços entre ROUTEs.
+
+        Parameters
+        ----------
+        nome : str
+            Nome (DEF) do nó a atualizar.
+        feitos : set[str]
+            Nomes já resolvidos neste frame.
+        """
+        if nome in feitos:
+            return
+        feitos.add(nome)
+
+        for rota in self.routes:
+            if rota.toNode == nome:
+                self._resolve_events(rota.fromNode, feitos)
+                rota.render()
+
+        no = X3DNode.named_nodes.get(nome)
+        if no in self.nodes_eventos:
+            no.render()  # type: ignore[attr-defined]
+
     def render(self) -> None:
         """
         Rotina de renderização.
         """
+        feitos: set[str] = set()
+        for rota in self.routes:
+            self._resolve_events(rota.toNode, feitos)
+
         for child in self.children:
             child.render()  # type: ignore[attr-defined]
 
