@@ -43,6 +43,28 @@ Textura = tuple[list[npt.NDArray[np.uint8]], npt.NDArray[np.float64]]
 # que testes possam fixar o instante renderizado trocando `gl._relogio`.
 _relogio: Callable[[], float] = time.time
 
+# Instante fixo em que os ciclos dos TimeSensors começam, ou None para contar a
+# partir da primeira avaliação (ver `definir_relogio` e `GL.setup`).
+_origem_fixa: float | None = None
+
+
+def definir_relogio(relogio: Callable[[], float], origem: float | None = None) -> None:
+    """
+    Troca o relógio dos TimeSensors, para renderizar a cena num instante conhecido.
+
+    Parameters
+    ----------
+    relogio : Callable[[], float]
+        Função sem argumentos que devolve o instante atual, em segundos.
+    origem : float or None, optional
+        Instante em que os ciclos começam. Com `origem=0.0` e um relógio que
+        devolve sempre T, um único frame sai no instante T da animação. Se
+        None, os ciclos contam a partir da primeira avaliação de um TimeSensor.
+    """
+    global _relogio, _origem_fixa
+    _relogio = relogio
+    _origem_fixa = origem
+
 
 class Colors(TypedDict):
     """
@@ -199,7 +221,7 @@ class GL:
         GL.transform_stack = [np.identity(4)]
         GL.lights = []
         GL.camera_position = np.zeros(3)
-        GL._t0 = None
+        GL._t0 = _origem_fixa
         GL.ms_buffer = np.zeros(
             (height, width, GL.MSAA_AMOSTRAS, GL.MSAA_AMOSTRAS, 3), dtype=np.uint8)
         GL.depth_buffer = np.ones(
