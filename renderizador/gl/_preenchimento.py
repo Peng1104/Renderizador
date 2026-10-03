@@ -8,7 +8,14 @@ import numpy.typing as npt
 from ._arestas import prepare_edges_and_bbox
 from ._cores import to_rgb8
 from ._estado import estado
-from ._lote import fill_lit_batch
+from ._lote import (
+    MIN_TRIANGULOS,
+    fonte_cor_vertice,
+    fonte_flat,
+    fonte_phong,
+    fonte_textura,
+    rasterizar_lote,
+)
 from ._projecao import front_facing_mask, project_points, to_world
 from ._texturas import get_texture_mipmaps
 from ._tipos import Colors, Malha, Textura, VerticeProjetado
@@ -19,6 +26,32 @@ from ._varredura import (
     scan_triangle_lit,
     scan_triangle_textured,
 )
+
+
+def lote_args(verts: list[VerticeProjetado], idx0: list[int], idx1: list[int], idx2: list[int]
+              ) -> tuple[npt.NDArray[np.float64], tuple[npt.NDArray[np.int64],
+                                                        npt.NDArray[np.int64],
+                                                        npt.NDArray[np.int64]]]:
+    """
+    Converte vértices e índices em listas para os arrays que a rasterização em lote espera.
+
+    Parameters
+    ----------
+    verts : list[VerticeProjetado]
+        Vértices projetados (x, y, w, z).
+    idx0, idx1, idx2 : list[int]
+        Índices dos três vértices de cada triângulo.
+
+    Returns
+    -------
+    NDArray[float64]
+        Vértices projetados, array (N, 4).
+    tuple[NDArray[int64], NDArray[int64], NDArray[int64]]
+        Índices dos três vértices de cada triângulo.
+    """
+    indices = (np.asarray(idx0, dtype=np.int64), np.asarray(idx1, dtype=np.int64),
+               np.asarray(idx2, dtype=np.int64))
+    return np.array(verts, dtype=np.float64), indices
 
 
 def fill_face_set_textured(idx0: list[int], idx1: list[int], idx2: list[int],
@@ -89,6 +122,12 @@ def fill_face_set_textured(idx0: list[int], idx1: list[int], idx2: list[int],
     uv = np.asarray(texCoord, dtype=np.float64).reshape(-1, 2)
     uv0, uv1, uv2 = uv[ti0], uv[ti1], uv[ti2]
 
+    if alpha >= 1.0 and len(idx0) >= MIN_TRIANGULOS:
+        vertices, indices = lote_args(verts, idx0, idx1, idx2)
+        fonte = fonte_textura(vertices, indices, mipmaps, np.stack([uv0, uv1, uv2], axis=1))
+        if rasterizar_lote(vertices, indices, fonte):
+            return True
+
     # zip de 6 iteráveis cai no overload genérico Iterable[Any] do
     # typeshed (só tipa até 5); zipar índices e uv's em dois 3-tuplos
     # primeiro mantém os 3 zips dentro do limite tipado.
@@ -155,6 +194,12 @@ def fill_face_set_color_per_vertex(idx0: list[int], idx1: list[int], idx2: list[
     ci0, ci1, ci2 = ci0[frente], ci1[frente], ci2[frente]
     cor0, cor1, cor2 = cores[ci0], cores[ci1], cores[ci2]
 
+    if alpha >= 1.0 and len(idx0) >= MIN_TRIANGULOS:
+        vertices, indices = lote_args(verts, idx0, idx1, idx2)
+        fonte = fonte_cor_vertice(np.stack([cor0, cor1, cor2], axis=1))
+        if rasterizar_lote(vertices, indices, fonte):
+            return True
+
     # Mesmo motivo do zip duplo em fill_face_set_textured.
     for t, ((a, b, c), (ca, cb, cc)) in enumerate(zip(zip(idx0, idx1, idx2),
                                                        zip(cor0, cor1, cor2))):
@@ -218,6 +263,11 @@ def fill_face_set_color_per_face(idx0: list[int], idx1: list[int], idx2: list[in
         color_idx_por_tri = face_id
 
     cor_tri = to_rgb8(cores[color_idx_por_tri])
+
+    if alpha >= 1.0 and len(idx0) >= MIN_TRIANGULOS:
+        vertices, indices = lote_args(verts, idx0, idx1, idx2)
+        if rasterizar_lote(vertices, indices, fonte_flat(np.asarray(cor_tri, dtype=np.int64))):
+            return
 
     for t, (a, b, c, cor) in enumerate(zip(idx0, idx1, idx2, cor_tri)):
         scan_triangle_depth(verts[a], verts[b], verts[c],
@@ -306,6 +356,16 @@ def fill_unlit(verts: list[VerticeProjetado],
     idx1: list[int] = tri[1].tolist()
     idx2: list[int] = tri[2].tolist()
 
+    if alpha >= 1.0 and len(idx0) >= MIN_TRIANGULOS:
+        vertices, indices = lote_args(verts, idx0, idx1, idx2)
+        if textura is None:
+            cor = np.asarray(to_rgb8(colors["emissiveColor"]), dtype=np.int64)
+            fonte = fonte_flat(np.broadcast_to(cor, (len(idx0), 3)))
+        else:
+            fonte = fonte_textura(vertices, indices, textura[0], textura[1][np.stack(indices, 1)])
+        if rasterizar_lote(vertices, indices, fonte):
+            return
+
     if textura is not None:
         mipmaps, uv = textura
         for t, (a, b, c) in enumerate(zip(idx0, idx1, idx2)):
@@ -371,9 +431,12 @@ def fill_lit(posicoes: npt.ArrayLike, verts: list[VerticeProjetado],
         n_tri = n_mundo[indices]
     pos_tri = mundo[indices]
 
-    if textura is None and alpha >= 1.0:
-        fill_lit_batch(np.array(verts), tri, pos_tri, n_tri, colors)
-        return
+    if alpha >= 1.0 and len(idx0) >= MIN_TRIANGULOS:
+        vertices = np.array(verts, dtype=np.float64)
+        amostra = (None if textura is None
+                   else fonte_textura(vertices, tri, textura[0], textura[1][indices]))
+        if rasterizar_lote(vertices, tri, fonte_phong(pos_tri, n_tri, colors, amostra)):
+            return
 
     for t, (a, b, c) in enumerate(zip(idx0, idx1, idx2)):
         tex = (textura[0], textura[1][indices[t]]) if textura is not None else None
