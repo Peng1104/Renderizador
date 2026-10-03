@@ -3,28 +3,14 @@ Nós X3D suportados. Importá-los aqui é o que registra cada classe por tag em 
 """
 
 from ._agrupamento import Transform
+from ._ambiente import Fog
 from ._aparencia import Appearance, ImageTexture, Material, Shape
-from ._nucleo import (
-    Box,
-    Circle2D,
-    Cone,
-    Cylinder,
-    DirectionalLight,
-    Fog,
-    IndexedFaceSet,
-    IndexedTriangleStripSet,
-    NavigationInfo,
-    OrientationInterpolator,
-    PointLight,
-    Polyline2D,
-    Polypoint2D,
-    Sphere,
-    SplinePositionInterpolator,
-    TriangleSet,
-    TriangleSet2D,
-    TriangleStripSet,
-    Viewpoint,
-)
+from ._geometria2d import Circle2D, Polyline2D, Polypoint2D, TriangleSet2D
+from ._geometria3d import Box, Cone, Cylinder, IndexedFaceSet, Sphere
+from ._iluminacao import DirectionalLight, PointLight
+from ._interpoladores import OrientationInterpolator, SplinePositionInterpolator
+from ._malhas import IndexedTriangleStripSet, TriangleSet, TriangleStripSet
+from ._navegacao import NavigationInfo, Viewpoint
 from ._propriedades import Color, Coordinate, TextureCoordinate
 from ._tempo import TimeSensor
 

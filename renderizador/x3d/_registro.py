@@ -9,20 +9,9 @@ from ._campos import Element, clean
 if TYPE_CHECKING:
     from ._agrupamento import Transform
     from ._aparencia import Appearance, ImageTexture, Material, Shape
-    from ._nucleo import (
-        Box,
-        Circle2D,
-        Cone,
-        Cylinder,
-        IndexedFaceSet,
-        IndexedTriangleStripSet,
-        Polyline2D,
-        Polypoint2D,
-        Sphere,
-        TriangleSet,
-        TriangleSet2D,
-        TriangleStripSet,
-    )
+    from ._geometria2d import Circle2D, Polyline2D, Polypoint2D, TriangleSet2D
+    from ._geometria3d import Box, Cone, Cylinder, IndexedFaceSet, Sphere
+    from ._malhas import IndexedTriangleStripSet, TriangleSet, TriangleStripSet
     from ._propriedades import Color, Coordinate, TextureCoordinate
 
 Fabrica = Callable[[Element], object]

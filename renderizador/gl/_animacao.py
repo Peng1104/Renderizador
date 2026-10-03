@@ -66,12 +66,15 @@ def timeSensor(cycleInterval: float, loop: bool) -> float:
 
     # Deve retornar a fração de tempo passada em fraction_changed
     agora = _relogio()
+
     if estado.t0 is None:
         estado.t0 = agora
 
     decorrido = agora - estado.t0
+    
     if loop:
         return (decorrido % cycleInterval) / cycleInterval
+    
     return min(decorrido / cycleInterval, 1.0)
 
 

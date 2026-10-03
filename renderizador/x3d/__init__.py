@@ -5,9 +5,9 @@ Parser X3D.
 componente do padrão X3D (agrupamento, aparência, geometrias, luzes, ...).
 """
 
+from ._cena import X3D
 from ._cores import Colors, get_colors
 from ._nos import NOS_SUPORTADOS
-from ._nucleo import X3D
 from ._preview import Circulo, Linha, Poligono, Ponto, Preview
 
 __all__ = [
