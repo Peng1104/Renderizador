@@ -30,9 +30,11 @@ VerticeProjetado = tuple[float, float, float, float]
 
 # Malha de triângulos indexada, em coordenadas de objeto: (posições (N, 3),
 # normais por vértice (N, 3), triângulos (T, 3) com índices de vértice em
-# ordem anti-horária vista de fora). É o que as primitivas (Box, Sphere,
-# Cone, Cylinder) geram e GL._draw_mesh consome.
-Malha = tuple[npt.NDArray[np.float64], npt.NDArray[np.float64], npt.NDArray[np.int64]]
+# ordem anti-horária vista de fora, coordenadas de textura UV por vértice
+# (N, 2)). É o que as primitivas (Box, Sphere, Cone, Cylinder) geram e
+# GL._draw_mesh consome.
+Malha = tuple[npt.NDArray[np.float64], npt.NDArray[np.float64], npt.NDArray[np.int64],
+              npt.NDArray[np.float64]]
 
 # Textura de uma malha: (cadeia de mipmaps, coordenadas UV (N, 2), uma por vértice).
 Textura = tuple[list[npt.NDArray[np.uint8]], npt.NDArray[np.float64]]
@@ -2387,13 +2389,18 @@ class GL:
         Returns
         -------
         Malha
-            Posições, normais e triângulos do disco (índices já deslocados
-            por `base`), em ordem anti-horária vista de fora.
+            Posições, normais, triângulos (índices já deslocados por `base`)
+            e UVs do disco, em ordem anti-horária vista de fora. Os UVs são
+            um recorte circular da textura (centro em (0.5, 0.5), raio 0.5),
+            com a imagem em pé vista de fora: na tampa de cima, com o fundo
+            (-Z) para o alto da imagem; na de baixo, com +Z para o alto.
         """
         c, s = GL._circle_xz(segmentos)
         anel = np.stack([raio * c, np.full_like(c, y), raio * s], axis=1)
         posicoes = np.vstack([[0.0, y, 0.0], anel])
         normais = np.tile([0.0, normal_y, 0.0], (len(posicoes), 1))
+        sentido_v = -normal_y  # vista de baixo, o alto da imagem passa de -Z para +Z
+        uv = 0.5 + 0.5 * np.stack([posicoes[:, 0], sentido_v * posicoes[:, 2]], axis=1) / raio
 
         j = np.arange(segmentos)
         centro = np.zeros(segmentos, dtype=np.int64)
@@ -2401,7 +2408,7 @@ class GL:
         # Vista de cima, φ crescente é horário; a tampa de baixo inverte a ordem.
         pares = (proximo, atual) if normal_y > 0 else (atual, proximo)
         triangulos = np.stack([centro, pares[0], pares[1]], axis=1) + base
-        return posicoes, normais, triangulos
+        return posicoes, normais, triangulos, uv
 
     @staticmethod
     def _join_meshes(malhas: list[Malha]) -> Malha:
@@ -2416,13 +2423,14 @@ class GL:
         Returns
         -------
         Malha
-            Malha única com os vértices, normais e triângulos de todas.
+            Malha única com os vértices, normais, triângulos e UVs de todas.
         """
         deslocamento = np.cumsum([0] + [len(m[0]) for m in malhas[:-1]])
         posicoes = np.vstack([m[0] for m in malhas])
         normais = np.vstack([m[1] for m in malhas])
         triangulos = np.vstack([m[2] + d for m, d in zip(malhas, deslocamento)])
-        return posicoes, normais, triangulos
+        uv = np.vstack([m[3] for m in malhas])
+        return posicoes, normais, triangulos, uv
 
     @staticmethod
     def _side_mesh(raio_topo: float, raio_base: float, altura: float, segmentos: int,
@@ -2451,8 +2459,11 @@ class GL:
         Returns
         -------
         Malha
-            Posições, normais e triângulos da lateral, em ordem anti-horária
-            vista de fora.
+            Posições, normais, triângulos e UVs da lateral, em ordem
+            anti-horária vista de fora. A textura dá a volta no sentido
+            anti-horário visto de cima, a partir do fundo (-Z): u vale 0 no
+            fundo, e o desenrolado (sem módulo) evita um salto de UV na
+            costura da malha. v vai de 0 na base a 1 no topo.
         """
         c, s = GL._circle_xz(segmentos)
         topo = np.stack([raio_topo * c, np.full_like(c, altura / 2), raio_topo * s], axis=1)
@@ -2467,7 +2478,10 @@ class GL:
         triangulos = np.vstack([np.stack([b1, b, t], axis=1), np.stack([b1, t, t1], axis=1)])
         if raio_topo == 0:  # cone: o segundo triângulo do quad degenera no vértice
             triangulos = triangulos[:segmentos]
-        return np.vstack([topo, base]), np.vstack([n, n]), triangulos
+        u = 0.75 - np.arange(segmentos + 1) / segmentos
+        uv = np.vstack([np.stack([u, np.ones_like(u)], axis=1),
+                        np.stack([u, np.zeros_like(u)], axis=1)])
+        return np.vstack([topo, base]), np.vstack([n, n]), triangulos, uv
 
     @staticmethod
     def _box_mesh(tamanho: tuple[float, float, float]) -> Malha:
@@ -2482,7 +2496,8 @@ class GL:
         Returns
         -------
         Malha
-            24 vértices (normais planas por face) e 12 triângulos.
+            24 vértices (normais planas por face), 12 triângulos e, em cada
+            face, a textura inteira (U para a direita e V para cima vistos de fora).
         """
         meio = np.asarray(tamanho, dtype=np.float64) / 2
         # Cada face: normal e 4 cantos em ordem anti-horária vista de fora.
@@ -2498,7 +2513,7 @@ class GL:
         normais = np.array([n for n, _ in faces for _ in range(4)], dtype=np.float64)
         quad = np.array([[0, 1, 2], [0, 2, 3]])
         triangulos = np.vstack([quad + 4 * f for f in range(len(faces))])
-        return posicoes, normais, triangulos
+        return posicoes, normais, triangulos, np.tile(GL._BOX_FACE_UV, (len(faces), 1))
 
     @staticmethod
     def _sphere_mesh(raio: float) -> Malha:
@@ -2513,8 +2528,10 @@ class GL:
         Returns
         -------
         Malha
-            Vértices, normais (direção radial) e triângulos; nos polos os
+            Vértices, normais (direção radial), triângulos e UVs; nos polos os
             triângulos degenerados têm área zero e são descartados pelo culling.
+            A textura dá a volta no sentido anti-horário visto de cima, a
+            partir do fundo (-Z), com v = 1 no polo norte (ver `GL._side_mesh`).
         """
         faixas, fatias = GL._SPHERE_FAIXAS, GL._SEGMENTOS
         theta = np.linspace(0.0, math.pi, faixas + 1)[:, None]
@@ -2527,7 +2544,10 @@ class GL:
         a = (i * (fatias + 1) + j).ravel()
         b, c, d = a + 1, a + fatias + 1, a + fatias + 2
         triangulos = np.vstack([np.stack([d, c, a], axis=1), np.stack([d, a, b], axis=1)])
-        return normais * raio, normais, triangulos
+        u = np.broadcast_to(0.75 - phi / (2 * math.pi), (faixas + 1, fatias + 1))
+        v = np.broadcast_to(1.0 - theta / math.pi, (faixas + 1, fatias + 1))
+        uv = np.stack([u, v], axis=-1).reshape(-1, 2)
+        return normais * raio, normais, triangulos, uv
 
     @staticmethod
     def _cached_mesh(chave: tuple[object, ...], construir: Callable[[], Malha]) -> Malha:
@@ -2862,7 +2882,25 @@ class GL:
                                   arestas_l[t], bboxes[t], colors, alpha, tex)
 
     @staticmethod
-    def _draw_mesh(malha: Malha, colors: Colors, textura: Textura | None = None) -> None:
+    def _optional_mipmaps(current_texture: list[str] | None) -> list[npt.NDArray[np.uint8]] | None:
+        """
+        Devolve os mipmaps da textura atual, ou None se o Appearance não tem textura.
+
+        Parameters
+        ----------
+        current_texture : list[str] or None
+            Caminho(s) da textura atual do Appearance.
+
+        Returns
+        -------
+        list[NDArray[uint8]] or None
+            Cadeia de mipmaps (ver `GL._get_texture_mipmaps`), ou None.
+        """
+        return GL._get_texture_mipmaps(current_texture) if current_texture else None
+
+    @staticmethod
+    def _draw_mesh(malha: Malha, colors: Colors, mipmaps: list[npt.NDArray[np.uint8]] | None = None
+                   ) -> None:
         """
         Projeta, descarta faces de costas e rasteriza uma malha de triângulos indexada.
 
@@ -2878,15 +2916,16 @@ class GL:
             Posições (em coordenadas de objeto), normais e triângulos.
         colors : Colors
             Cores resolvidas do Appearance/Material do nó.
-        textura : Textura or None, optional
-            Mipmaps e UVs por vértice da malha, se tiver textura.
+        mipmaps : list[NDArray[uint8]] or None, optional
+            Cadeia de mipmaps da textura da malha (ver
+            `GL._get_texture_mipmaps`), se tiver; os UVs vêm da própria malha.
 
         Returns
         -------
         None
             Escreve em GL.ms_buffer; não há retorno.
         """
-        posicoes, normais, triangulos = malha
+        posicoes, normais, triangulos, uv = malha
         tela_x, tela_y, tela_w, tela_z = GL._project_points(posicoes.ravel().tolist())
 
         i0, i1, i2 = triangulos[:, 0], triangulos[:, 1], triangulos[:, 2]
@@ -2899,6 +2938,7 @@ class GL:
         verts: list[VerticeProjetado] = list(
             zip(tela_x.tolist(), tela_y.tolist(), tela_w.tolist(), tela_z.tolist()))
         arestas_l, bboxes = GL._prepare_edges_and_bbox(tela_x, tela_y, i0, i1, i2)
+        textura = (mipmaps, uv) if mipmaps else None
         GL._fill_triangles(posicoes, verts, i0, i1, i2, arestas_l, bboxes, colors, normais,
                            textura)
 
@@ -2928,12 +2968,10 @@ class GL:
         """
         x, y, z = size
         malha = GL._cached_mesh(("box", x, y, z), lambda: GL._box_mesh((x, y, z)))
-        mipmaps = GL._get_texture_mipmaps(current_texture) if current_texture else None
-        textura = (mipmaps, np.tile(GL._BOX_FACE_UV, (6, 1))) if mipmaps else None
-        GL._draw_mesh(malha, colors, textura)
+        GL._draw_mesh(malha, colors, GL._optional_mipmaps(current_texture))
 
     @staticmethod
-    def sphere(radius: float, colors: Colors) -> None:
+    def sphere(radius: float, colors: Colors, current_texture: list[str] | None = None) -> None:
         """
         Renderiza Sphere: uma esfera centrada na origem local.
 
@@ -2943,6 +2981,10 @@ class GL:
             Raio da esfera.
         colors : Colors
             Cores resolvidas do Appearance/Material do nó.
+        current_texture : list[str] or None, optional
+            Caminho(s) da textura atual do Appearance, se houver.
+            A textura dá a volta na esfera, com a costura no
+            fundo (-Z) e v = 1 no polo norte.
 
         Returns
         -------
@@ -2951,10 +2993,11 @@ class GL:
             retorno.
         """
         malha = GL._cached_mesh(("sphere", radius), lambda: GL._sphere_mesh(radius))
-        GL._draw_mesh(malha, colors)
+        GL._draw_mesh(malha, colors, GL._optional_mipmaps(current_texture))
 
     @staticmethod
-    def cone(bottomRadius: float, height: float, colors: Colors) -> None:
+    def cone(bottomRadius: float, height: float, colors: Colors,
+             current_texture: list[str] | None = None) -> None:
         """
         Renderiza Cone: um cone centrado na origem local, alinhado ao eixo Y.
 
@@ -2968,6 +3011,10 @@ class GL:
             Altura do cone.
         colors : Colors
             Cores resolvidas do Appearance/Material do nó.
+        current_texture : list[str] or None, optional
+            Caminho(s) da textura atual do Appearance, se houver.
+            A lateral dá a volta no cone (v = 1 no vértice) e a
+            base mostra um recorte circular da textura.
 
         Returns
         -------
@@ -2981,10 +3028,11 @@ class GL:
             return GL._join_meshes([lateral, tampa])
 
         malha = GL._cached_mesh(("cone", bottomRadius, height), construir)
-        GL._draw_mesh(malha, colors)
+        GL._draw_mesh(malha, colors, GL._optional_mipmaps(current_texture))
 
     @staticmethod
-    def cylinder(radius: float, height: float, colors: Colors) -> None:
+    def cylinder(radius: float, height: float, colors: Colors,
+                 current_texture: list[str] | None = None) -> None:
         """
         Renderiza Cylinder: um cilindro centrado na origem local, alinhado ao eixo Y.
 
@@ -2998,6 +3046,10 @@ class GL:
             Altura do cilindro.
         colors : Colors
             Cores resolvidas do Appearance/Material do nó.
+        current_texture : list[str] or None, optional
+            Caminho(s) da textura atual do Appearance, se houver.
+            A lateral dá a volta no cilindro e as tampas mostram
+            um recorte circular da textura.
 
         Returns
         -------
@@ -3012,7 +3064,7 @@ class GL:
             return GL._join_meshes([lateral, topo, baixo])
 
         malha = GL._cached_mesh(("cylinder", radius, height), construir)
-        GL._draw_mesh(malha, colors)
+        GL._draw_mesh(malha, colors, GL._optional_mipmaps(current_texture))
 
     @staticmethod
     def navigationInfo(headlight: bool) -> None:

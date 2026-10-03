@@ -1302,8 +1302,10 @@ class Sphere(X3DGeometryNode):
             raise Exception("Sphere não foi implementado.")
 
         colors = get_colors(appearance)
+
         if self.radius:
-            X3D.renderer["Sphere"](radius=self.radius, colors=colors)
+            X3D.renderer["Sphere"](radius=self.radius, colors=colors,
+                                   current_texture=X3D.current_texture)
 
 
 class Cone(X3DGeometryNode):
@@ -1327,8 +1329,10 @@ class Cone(X3DGeometryNode):
             raise Exception("Cone não foi implementado.")
 
         colors = get_colors(appearance)
+
         if self.height and self.bottomRadius:
-            X3D.renderer["Cone"](bottomRadius=self.bottomRadius, height=self.height, colors=colors)
+            X3D.renderer["Cone"](bottomRadius=self.bottomRadius, height=self.height,
+                                 colors=colors, current_texture=X3D.current_texture)
 
 class Cylinder(X3DGeometryNode):
     """
@@ -1351,8 +1355,10 @@ class Cylinder(X3DGeometryNode):
             raise Exception("Cylinder não foi implementado.")
 
         colors = get_colors(appearance)
+        
         if self.radius and self.height:
-            X3D.renderer["Cylinder"](radius=self.radius, height=self.height, colors=colors)
+            X3D.renderer["Cylinder"](radius=self.radius, height=self.height, colors=colors,
+                                     current_texture=X3D.current_texture)
 
 class IndexedFaceSet(X3DComposedGeometryNode):
     """
