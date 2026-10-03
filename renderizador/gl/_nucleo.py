@@ -11,184 +11,28 @@ Disciplina: Computação Gráfica
 Data: 19/08/2026
 """
 
-import math  # Funções matemáticas
-import time  # Para operações com tempo
-from collections.abc import Callable
-from typing import ClassVar, TypedDict
+import math
+from typing import ClassVar
 
 import gpu  # Simula os recursos de uma GPU
-import numpy as np  # Biblioteca do Numpy
+import numpy as np
 import numpy.typing as npt
 
-# Um vértice de triângulo já projetado em coordenadas de tela: (x, y, w, z),
-# onde w é o componente w do espaço de clip e z o componente z de NDC
-# (ambos devolvidos por GL._project_points). Agrupar os 4 valores por
-# vértice numa tupla, em vez de 4 parâmetros soltos por vértice, mantém as
-# funções de varredura de triângulo dentro do limite de parâmetros por
-# método.
-VerticeProjetado = tuple[float, float, float, float]
+from ._animacao import orientationInterpolator, splinePositionInterpolator, timeSensor
+from ._constantes import LOTE_MINIMO, MSAA_AMOSTRAS, SEGMENTOS
+from ._cores import piso, to_rgb8
+from ._estado import estado
+from ._malhas import box_mesh, cached_mesh, cap_mesh, join_meshes, side_mesh, sphere_mesh
+from ._matrizes import perspective_matrix, rotation_matrix, scale_matrix, translation_matrix
+from ._texturas import get_texture_mipmaps, optional_mipmaps, sample_texture
+from ._tipos import Colors, Malha, Textura, VerticeProjetado
+from ._triangulacao import fan_triangulate_cached, strip_triangle_indices
 
-# Malha de triângulos indexada, em coordenadas de objeto: (posições (N, 3),
-# normais por vértice (N, 3), triângulos (T, 3) com índices de vértice em
-# ordem anti-horária vista de fora, coordenadas de textura UV por vértice
-# (N, 2)). É o que as primitivas (Box, Sphere, Cone, Cylinder) geram e
-# GL._draw_mesh consome.
-Malha = tuple[npt.NDArray[np.float64], npt.NDArray[np.float64], npt.NDArray[np.int64],
-              npt.NDArray[np.float64]]
-
-# Textura de uma malha: (cadeia de mipmaps, coordenadas UV (N, 2), uma por vértice).
-Textura = tuple[list[npt.NDArray[np.uint8]], npt.NDArray[np.float64]]
-
-# Relógio dos TimeSensors, em segundos. Fica no módulo, e não na classe, para
-# que testes possam fixar o instante renderizado trocando `gl._relogio`.
-_relogio: Callable[[], float] = time.time
-
-# Instante fixo em que os ciclos dos TimeSensors começam, ou None para contar a
-# partir da primeira avaliação (ver `definir_relogio` e `GL.setup`).
-_origem_fixa: float | None = None
-
-
-def definir_relogio(relogio: Callable[[], float], origem: float | None = None) -> None:
-    """
-    Troca o relógio dos TimeSensors, para renderizar a cena num instante conhecido.
-
-    Parameters
-    ----------
-    relogio : Callable[[], float]
-        Função sem argumentos que devolve o instante atual, em segundos.
-    origem : float or None, optional
-        Instante em que os ciclos começam. Com `origem=0.0` e um relógio que
-        devolve sempre T, um único frame sai no instante T da animação. Se
-        None, os ciclos contam a partir da primeira avaliação de um TimeSensor.
-    """
-    global _relogio, _origem_fixa
-    _relogio = relogio
-    _origem_fixa = origem
-
-
-class Colors(TypedDict):
-    """
-    Conjunto de cores resolvidas a partir de um nó Appearance/Material.
-    """
-
-    diffuseColor: list[float]
-    emissiveColor: list[float]
-    specularColor: list[float]
-    shininess: float
-    transparency: float
-    ambientIntensity: float
-
-class Luz(TypedDict):
-    """
-    Fonte de luz direcional ativa no frame, já em coordenadas de mundo.
-    """
-
-    direcao: npt.NDArray[np.float64]  # unitário, sentido em que a luz viaja
-    cor: npt.NDArray[np.float64]
-    intensidade: float
-    ambiente: float
-
-
-class Pointo2D:
-    """
-    Classe que representa um ponto 2D.
-    """
-
-    x: int
-    y: int
 
 class GL:
     """
     Classe que representa a biblioteca gráfica (Graphics Library).
     """
-
-    width: ClassVar[int]  # largura da tela
-    height: ClassVar[int] # altura da tela
-    near: ClassVar[float] # plano de corte próximo
-    far: ClassVar[float]  # plano de corte distante
-
-    # Matriz view (mundo -> câmera) e de projeção perspectiva (câmera -> clip),
-    # calculadas em GL.viewpoint(). Identidade até que um Viewpoint seja lido.
-    view_matrix: ClassVar[npt.NDArray[np.float64]]
-    perspective_matrix: ClassVar[npt.NDArray[np.float64]]
-
-    # Pilha de matrizes de transformação (objeto -> mundo). O topo (última posição)
-    # é a matriz corrente, acumulada dos Transforms ancestrais no grafo de cena.
-    transform_stack: ClassVar[list[npt.NDArray[np.float64]]]
-
-    # 4x MSAA: grade de MSAA_AMOSTRAS x MSAA_AMOSTRAS subamostras por pixel (2x2=4).
-    # ms_buffer guarda, para cada pixel e cada subamostra, a última cor escrita
-    # nela (por ordem de desenho, como um MSAA de verdade faria com os
-    # fragmentos que cobrem cada subamostra). O resolve (média das subamostras
-    # de cada pixel) só acontece uma vez por frame, em GL.resolve_multisample(),
-    # depois que toda a cena já foi desenhada, por isso o anti-aliasing não
-    # sofre do problema de "blend duplicado" que geometria adjacente causaria
-    # se cada primitivo misturasse sua cobertura parcial direto no framebuffer
-    # final.
-    MSAA_AMOSTRAS: ClassVar[int] = 2
-    ms_buffer: ClassVar[npt.NDArray[np.uint8]]
-
-    # Z-buffer: profundidade (Z de NDC, em [-1, 1], near=-1 e far=1) da última
-    # subamostra vencedora em cada subamostra de ms_buffer, mesma grade
-    # MSAA_AMOSTRAS x MSAA_AMOSTRAS por pixel. Inicializado (e limpo a cada
-    # frame) com o valor do plano far (1.0), o mais distante possível, para
-    # que qualquer triângulo desenhado vença o teste de profundidade por
-    # padrão. Um fragmento só é escrito em ms_buffer se sua profundidade
-    # interpolada for <= a já registrada aqui (mais perto da câmera vence),
-    # o que resolve oclusão entre triângulos independente da ordem de
-    # desenho, ao contrário de simplesmente confiar na ordem de travessia
-    # do grafo de cena (um "painter's algorithm" implícito e incorreto para
-    # geometria que se cruza).
-    depth_buffer: ClassVar[npt.NDArray[np.float64]]
-
-    # Cache de texturas já carregadas (chave: caminho em current_texture), para
-    # não reler o arquivo de imagem do disco a cada face que a usa.
-    _texture_cache: ClassVar[dict[str, npt.NDArray[np.uint8]]] = {}
-
-    # Cache das cadeias de mipmap já construídas (mesma chave de _texture_cache),
-    # para não reconstruir a pirâmide de níveis a cada face que usa a textura.
-    _mipmap_cache: ClassVar[dict[str, list[npt.NDArray[np.uint8]]]] = {}
-
-    # Cache da triangulação em leque de IndexedFaceSet, por id() da lista de
-    # índices (coordIndex/colorIndex/texCoordIndex), para não retriangular a
-    # cada frame uma malha estática (ver GL._fan_triangulate_cached).
-    _fan_cache: ClassVar[dict[int, tuple[npt.NDArray[np.int64], npt.NDArray[np.int64],
-                                          npt.NDArray[np.int64], npt.NDArray[np.int64]]]] = {}
-
-    # Quantidade mínima de triângulos de um draw call a partir da qual vale a
-    # pena pré-calcular arestas/bbox em lote (GL._batch_edges_and_bbox): abaixo
-    # disso, o custo fixo de montar os arrays em lote (stack, roll, listas de
-    # retorno) supera a economia de não recalcular por triângulo, medido em
-    # bound500.x3d (500 draw calls de 1 triângulo cada, ver GL._prepare_edges_and_bbox).
-    _LOTE_MINIMO: ClassVar[int] = 8
-
-    # Luzes direcionais do frame corrente, em coordenadas de mundo. Esvaziada em
-    # GL.clear() e preenchida por GL.navigationInfo (headlight) e
-    # GL.directionalLight, que o grafo de cena visita antes das geometrias.
-    lights: ClassVar[list[Luz]]
-
-    # Posição da câmera em coordenadas de mundo (definida em GL.viewpoint), usada
-    # no vetor até o observador do termo especular.
-    camera_position: ClassVar[npt.NDArray[np.float64]]
-
-    # Instante do primeiro TimeSensor avaliado, de onde todos os ciclos contam
-    # (None até lá e após GL.setup). O relógio em si é `_relogio`, no módulo.
-    _t0: ClassVar[float | None] = None
-
-    # Resolução da tesselação das primitivas curvas: fatias ao redor do eixo
-    # (esfera, cone, cilindro) e faixas de latitude da esfera.
-    _SEGMENTOS: ClassVar[int] = 48
-    _SPHERE_FAIXAS: ClassVar[int] = 24
-
-    # UV dos 4 cantos de cada face do Box, na ordem de GL._box_mesh (canto
-    # inferior esquerdo, inferior direito, superior direito, superior esquerdo,
-    # vistos de fora): a textura inteira em cada face.
-    _BOX_FACE_UV: ClassVar[npt.NDArray[np.float64]] = np.array(
-        [[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]])
-
-    # Cache das malhas das primitivas, por (tipo, parâmetros), para não
-    # retesselar a cada frame (ver GL._cached_mesh).
-    _mesh_cache: ClassVar[dict[tuple[object, ...], Malha]] = {}
 
     @staticmethod
     def setup(width: int, height: int, near: float = 0.01, far: float = 1000) -> None:
@@ -212,37 +56,37 @@ class GL:
             Inicializa os atributos de classe da GL (matrizes, pilha de
             transformações, buffer de multisample); não há retorno.
         """
-        GL.width = width
-        GL.height = height
-        GL.near = near
-        GL.far = far
-        GL.view_matrix = np.identity(4)
-        GL.perspective_matrix = np.identity(4)
-        GL.transform_stack = [np.identity(4)]
-        GL.lights = []
-        GL.camera_position = np.zeros(3)
-        GL._t0 = _origem_fixa
-        GL.ms_buffer = np.zeros(
-            (height, width, GL.MSAA_AMOSTRAS, GL.MSAA_AMOSTRAS, 3), dtype=np.uint8)
-        GL.depth_buffer = np.ones(
-            (height, width, GL.MSAA_AMOSTRAS, GL.MSAA_AMOSTRAS), dtype=np.float64)
+        estado.width = width
+        estado.height = height
+        estado.near = near
+        estado.far = far
+        estado.view_matrix = np.identity(4)
+        estado.perspective_matrix = np.identity(4)
+        estado.transform_stack = [np.identity(4)]
+        estado.lights = []
+        estado.camera_position = np.zeros(3)
+        estado.t0 = estado.origem_fixa
+        estado.ms_buffer = np.zeros(
+            (height, width, MSAA_AMOSTRAS, MSAA_AMOSTRAS, 3), dtype=np.uint8)
+        estado.depth_buffer = np.ones(
+            (height, width, MSAA_AMOSTRAS, MSAA_AMOSTRAS), dtype=np.float64)
 
     @staticmethod
     def clear() -> None:
         """
         Limpa o frame atual: o FrameBuffer do GPU e os buffers internos da GL.
 
-        Chama gpu.GPU.clear_buffer() e reinicia GL.ms_buffer com a mesma cor
-        de limpeza e GL.depth_buffer com o plano far (1.0); ambos são
+        Chama gpu.GPU.clear_buffer() e reinicia estado.ms_buffer com a mesma cor
+        de limpeza e estado.depth_buffer com o plano far (1.0); ambos são
         conceitos internos da GL (a camada acima do GPU simulado), então não
         podem viver dentro de gpu.GPU.clear_buffer() sem inverter a
         dependência entre as camadas; centralizar as limpezas aqui mantém
         uma única chamada no início de cada frame.
         """
         gpu.GPU.clear_buffer()
-        GL.ms_buffer[:] = gpu.GPU.clear_color_val
-        GL.depth_buffer[:] = 1.0
-        GL.lights = []
+        estado.ms_buffer[:] = gpu.GPU.clear_color_val
+        estado.depth_buffer[:] = 1.0
+        estado.lights = []
 
     @staticmethod
     def resolve_multisample() -> None:
@@ -254,166 +98,9 @@ class GL:
         que toda a cena já foi desenhada (equivalente ao "resolve pass" de um
         MSAA real).
         """
-        resolvido = GL.ms_buffer.mean(axis=(2, 3))
+        resolvido = estado.ms_buffer.mean(axis=(2, 3))
         buffer_cor = gpu.GPU.frame_buffer[gpu.GPU.draw_framebuffer].color
-        buffer_cor[:] = GL._round(resolvido).astype(np.uint8)
-
-    @staticmethod
-    def _translation_matrix(t: list[float]) -> npt.NDArray[np.float64]:
-        """
-        Monta a matriz 4x4 homogênea de translação.
-
-        Parameters
-        ----------
-        t : list[float]
-            Vetor de translação [x, y, z].
-
-        Returns
-        -------
-        NDArray[float64]
-            Matriz 4x4 homogênea correspondente à translação `t`.
-        """
-        m = np.identity(4)
-        m[:3, 3] = t
-        return m
-
-    @staticmethod
-    def _scale_matrix(s: list[float]) -> npt.NDArray[np.float64]:
-        """
-        Monta a matriz 4x4 homogênea de escala.
-
-        Parameters
-        ----------
-        s : list[float]
-            Fatores de escala [x, y, z], um por eixo.
-
-        Returns
-        -------
-        NDArray[float64]
-            Matriz 4x4 homogênea correspondente à escala `s`.
-        """
-        m = np.identity(4)
-        m[0, 0], m[1, 1], m[2, 2] = s
-        return m
-
-    @staticmethod
-    def _axis_angle_to_quaternion(rotation: list[float]) -> npt.NDArray[np.float64]:
-        """
-        Converte eixo [x, y, z] e ângulo t (radianos) num quatérnio unitário.
-
-        Segue a regra da mão direita.
-
-        Parameters
-        ----------
-        rotation : list[float]
-            Rotação no formato [x, y, z, t]: eixo [x, y, z] (não precisa estar
-            normalizado) e ângulo t em radianos.
-
-        Returns
-        -------
-        NDArray[float64]
-            Quatérnio unitário [w, x, y, z] equivalente. Retorna o quatérnio
-            identidade [1, 0, 0, 0] quando o eixo é nulo.
-        """
-        eixo = np.asarray(rotation[:3], dtype=np.float64)
-        norma = np.linalg.norm(eixo)
-
-        if norma == 0:
-            return np.array([1.0, 0.0, 0.0, 0.0])
-
-        eixo = eixo / norma
-        t = rotation[3]
-        metade = t / 2
-        return np.array([math.cos(metade), *(eixo * math.sin(metade))])
-
-    @staticmethod
-    def _quaternion_to_rotation_matrix(q: npt.NDArray[np.float64]) -> npt.NDArray[np.float64]:
-        """
-        Monta a matriz 4x4 homogênea de rotação a partir de um quatérnio unitário.
-
-        Parameters
-        ----------
-        q : NDArray[float64]
-            Quatérnio unitário [w, x, y, z].
-
-        Returns
-        -------
-        NDArray[float64]
-            Matriz 4x4 homogênea de rotação equivalente a `q`.
-        """
-        w, x, y, z = q
-
-        # Fórmula padrão de conversão quatérnio unitário -> matriz de rotação,
-        # obtida expandindo a rotação de um vetor v por v' = q*v*q⁻¹:
-        # - Diagonal: cada eixo permanece 1 menos a contribuição dos OUTROS dois
-        #   componentes da parte vetorial (ex: R[0][0]=1-2(y²+z²), a rotação em
-        #   torno de x não deveria afetar o próprio x, só y e z, evitar o gimbal lock).
-        # - Fora da diagonal: cada par (i,j) tem um termo simétrico de produto
-        #   cruzado 2*qi*qj (a parte "linear" da rotação, do termo q_v⊗q_v) somado
-        #   ou subtraído de um termo 2*w*qk (a parte "antissimétrica" que vem do
-        #   termo w*[q_v]×, troca de sinal conforme (i,j,k) seguem a regra da
-        #   mão direita, por isso R[i][j] e R[j][i] têm o termo 2*w*qk com sinais opostos).
-
-        m = np.identity(4)
-        m[:3, :3] = np.array([
-            [1 - 2 * (y * y + z * z), 2 * (x * y - w * z),     2 * (x * z + w * y)],
-            [2 * (x * y + w * z),     1 - 2 * (x * x + z * z), 2 * (y * z - w * x)],
-            [2 * (x * z - w * y),     2 * (y * z + w * x),     1 - 2 * (x * x + y * y)],
-        ])
-        return m
-
-    @staticmethod
-    def _rotation_matrix(rotation: list[float]) -> npt.NDArray[np.float64]:
-        """
-        Monta a matriz 4x4 homogênea de rotação a partir de eixo e ângulo.
-
-        Parameters
-        ----------
-        rotation : list[float]
-            Rotação no formato [x, y, z, t]: eixo [x, y, z] e ângulo t em
-            radianos, seguindo a regra da mão direita.
-
-        Returns
-        -------
-        NDArray[float64]
-            Matriz 4x4 homogênea de rotação equivalente a `rotation`.
-        """
-        return GL._quaternion_to_rotation_matrix(GL._axis_angle_to_quaternion(rotation))
-
-    @staticmethod
-    def _perspective_matrix(field_of_view: float, aspect: float, near: float,
-                            far: float) -> npt.NDArray[np.float64]:
-        """
-        Monta a matriz de projeção perspectiva.
-
-        Parameters
-        ----------
-        field_of_view : float
-            Campo de visão vertical, em radianos, já ajustado à razão de
-            aspecto (ver GL.viewpoint).
-        aspect : float
-            Razão de aspecto da tela (largura / altura).
-        near : float
-            Distância do plano de corte próximo da câmera.
-        far : float
-            Distância do plano de corte distante da câmera.
-
-        Returns
-        -------
-        NDArray[float64]
-            Matriz 4x4 de projeção perspectiva (câmera -> clip).
-        """
-        top = near * math.tan(field_of_view / 2)
-        right = top * aspect
-        z_escala = -(far + near) / (far - near)
-        z_translacao = -2 * far * near / (far - near)
-
-        return np.array([
-            [near / right, 0,          0,           0],
-            [0,            near / top, 0,           0],
-            [0,            0,          z_escala,    z_translacao],
-            [0,            0,          -1,          0],
-        ], dtype=np.float64)
+        buffer_cor[:] = piso(resolvido).astype(np.uint8)
 
     # Matrizes de reflexão e rotação usadas para gerar
     # os 8 octantes simétricos de um círculo a partir de um único octante calculado.
@@ -423,45 +110,6 @@ class GL:
         [[-1, 0], [0, -1]], [[0, -1], [-1, 0]],
         [[0, 1], [-1, 0]], [[1, 0], [0, -1]],
     ], dtype=np.float64)
-
-    @staticmethod
-    def _round(valor: npt.ArrayLike) -> npt.NDArray[np.float64]:
-        """
-        Converte coordenada contínua para índice de pixel.
-
-        Cada pixel n cobre o intervalo [n, n+1), então o índice correto é o
-        piso da coordenada.
-
-        Parameters
-        ----------
-        valor : ArrayLike
-            Coordenada (ou array de coordenadas) contínua a converter.
-
-        Returns
-        -------
-        NDArray[float64]
-            Piso de `valor`, mesma forma que a entrada.
-        """
-        return np.floor(np.asarray(valor, dtype=np.float64))
-
-    @staticmethod
-    def _to_rgb8(cor: npt.ArrayLike) -> npt.NDArray[np.int64]:
-        """
-        Converte uma cor X3D (0 a 1) para o intervalo 0-255 usado pelo matplotlib.
-
-        Parameters
-        ----------
-        cor : ArrayLike
-            Cor (ou array de cores) no formato X3D, com cada canal em [0, 1]
-            (ex: emissiveColor, ou um array (N, 3) de cores por triângulo).
-
-        Returns
-        -------
-        NDArray[int64]
-            Cor com cada canal em [0, 255], arredondada e recortada à faixa.
-        """
-        return np.clip(
-            GL._round(np.asarray(cor, dtype=np.float64) * 255), 0, 255).astype(np.int64).tolist()
 
     @staticmethod
     def _draw_points(xs: npt.NDArray[np.int64], ys: npt.NDArray[np.int64],
@@ -485,10 +133,10 @@ class GL:
         Returns
         -------
         None
-            Escreve em GL.ms_buffer; não há retorno.
+            Escreve em estado.ms_buffer; não há retorno.
         """
-        dentro = (xs >= 0) & (xs < GL.width) & (ys >= 0) & (ys < GL.height)
-        GL.ms_buffer[ys[dentro], xs[dentro], :, :] = cor
+        dentro = (xs >= 0) & (xs < estado.width) & (ys >= 0) & (ys < estado.height)
+        estado.ms_buffer[ys[dentro], xs[dentro], :, :] = cor
 
     @staticmethod
     def _draw_points_blend(xs: npt.NDArray[np.int64], ys: npt.NDArray[np.int64],
@@ -521,26 +169,27 @@ class GL:
         Returns
         -------
         None
-            Escreve em GL.ms_buffer; não há retorno.
+            Escreve em estado.ms_buffer; não há retorno.
         """
         # Verifica quais pontos caem dentro da tela e têm cobertura positiva.
-        dentro = (xs >= 0) & (xs < GL.width) & (ys >= 0) & (ys < GL.height) & (cobertura > 0)
+        dentro = ((xs >= 0) & (xs < estado.width) & (ys >= 0) & (ys < estado.height)
+                  & (cobertura > 0))
         xs_d, ys_d, cov_d = xs[dentro], ys[dentro], cobertura[dentro]
 
         # Quantiza a cobertura contínua para a quantidade de subamostras a
         # cobrir, de 0 a total_amostras.
-        total_amostras = GL.MSAA_AMOSTRAS * GL.MSAA_AMOSTRAS
-        n_amostras = np.clip(GL._round(cov_d * total_amostras), 0, total_amostras).astype(np.int64)
+        total_amostras = MSAA_AMOSTRAS * MSAA_AMOSTRAS
+        n_amostras = np.clip(piso(cov_d * total_amostras), 0, total_amostras).astype(np.int64)
 
         # Máscara booleana por ponto: quais das total_amostras subamostras
         # (as N primeiras, em ordem fixa) devem receber a cor.
         indices = np.arange(total_amostras)
         marcar = (indices[None, :] < n_amostras[:, None]).reshape(
-            -1, GL.MSAA_AMOSTRAS, GL.MSAA_AMOSTRAS)
+            -1, MSAA_AMOSTRAS, MSAA_AMOSTRAS)
         
-        atual = GL.ms_buffer[ys_d, xs_d]
+        atual = estado.ms_buffer[ys_d, xs_d]
         atual[marcar] = np.asarray(cor) # Aplica o MSAA
-        GL.ms_buffer[ys_d, xs_d] = atual
+        estado.ms_buffer[ys_d, xs_d] = atual
 
     @staticmethod
     def _line_points(x0: float, y0: float, x1: float, y1: float
@@ -639,13 +288,13 @@ class GL:
         Returns
         -------
         None
-            Escreve em GL.ms_buffer; não há retorno.
+            Escreve em estado.ms_buffer; não há retorno.
         """
         # Bounding box do triângulo
         min_x = max(0, math.floor(min(x0, x1, x2)))
-        max_x = min(GL.width - 1, math.ceil(max(x0, x1, x2)))
+        max_x = min(estado.width - 1, math.ceil(max(x0, x1, x2)))
         min_y = max(0, math.floor(min(y0, y1, y2)))
-        max_y = min(GL.height - 1, math.ceil(max(y0, y1, y2)))
+        max_y = min(estado.height - 1, math.ceil(max(y0, y1, y2)))
 
         # Fora da tela: não há pixels a preencher, retorna sem escrever nada.
         if min_x > max_x or min_y > max_y:
@@ -672,7 +321,7 @@ class GL:
 
         # m subamostras por eixo (m*m por pixel), centralizadas em cada célula
         # 1/m de um pixel: com m=2 (4x MSAA), deslocamentos 0.25 e 0.75.
-        m = GL.MSAA_AMOSTRAS
+        m = MSAA_AMOSTRAS
         desloc = (np.arange(m) + 0.5) / m
 
         xs_pixel = np.arange(min_x, max_x + 1)
@@ -698,7 +347,7 @@ class GL:
         ys_idx, sy_idx, xs_idx, sx_idx = np.nonzero(dentro)
 
         # Preenche as subamostras correspondentes no buffer de multisample com a cor do triângulo.
-        GL.ms_buffer[ys_pixel[ys_idx], xs_pixel[xs_idx], sy_idx, sx_idx] = cor
+        estado.ms_buffer[ys_pixel[ys_idx], xs_pixel[xs_idx], sy_idx, sx_idx] = cor
 
     @staticmethod
     def _blend_write(ys: npt.NDArray[np.int64], xs: npt.NDArray[np.int64],
@@ -706,10 +355,10 @@ class GL:
                      cor: npt.NDArray[np.float64] | npt.NDArray[np.int64] | npt.NDArray[np.uint8],
                      alpha: float) -> None:
         """
-        Escreve cor em GL.ms_buffer, misturando com o que já está lá se houver transparência.
+        Escreve cor em estado.ms_buffer, misturando com o que já está lá se houver transparência.
 
-        Implementa alpha blending (`GL.ms_buffer` = `cor` * `alpha` +
-        `GL.ms_buffer` * `(1 - alpha)`) nas subamostras indicadas.
+        Implementa alpha blending (`estado.ms_buffer` = `cor` * `alpha` +
+        `estado.ms_buffer` * `(1 - alpha)`) nas subamostras indicadas.
         `alpha` vem de `1 - transparency` do Material X3D: `transparency` 0
         é opaco (`alpha` 1) e 1 é totalmente transparente (`alpha` 0). Com
         `alpha >= 1.0` (caso comum, geometria opaca) pula a mistura e
@@ -718,7 +367,7 @@ class GL:
         Parameters
         ----------
         ys, xs, sy, sx : NDArray[int64]
-            Índices em `GL.ms_buffer` (linha, coluna, subamostra y,
+            Índices em `estado.ms_buffer` (linha, coluna, subamostra y,
             subamostra x) das subamostras a escrever, mesmo tamanho.
         cor : NDArray[float64], NDArray[int64] or NDArray[uint8]
             Cor RGB (0-255) a escrever, um único vetor (3,) para
@@ -729,16 +378,16 @@ class GL:
         Returns
         -------
         None
-            Escreve em GL.ms_buffer; não há retorno.
+            Escreve em estado.ms_buffer; não há retorno.
         """
         if alpha >= 1.0:
-            GL.ms_buffer[ys, xs, sy, sx] = cor
+            estado.ms_buffer[ys, xs, sy, sx] = cor
             return
 
-        fundo = GL.ms_buffer[ys, xs, sy, sx].astype(np.float64)
+        fundo = estado.ms_buffer[ys, xs, sy, sx].astype(np.float64)
         frente = np.asarray(cor, dtype=np.float64)
         mistura = frente * alpha + fundo * (1 - alpha)
-        GL.ms_buffer[ys, xs, sy, sx] = np.clip(GL._round(mistura), 0, 255).astype(np.uint8)
+        estado.ms_buffer[ys, xs, sy, sx] = np.clip(piso(mistura), 0, 255).astype(np.uint8)
 
     @staticmethod
     def _batch_edges_and_bbox(tela_x: npt.NDArray[np.float64], tela_y: npt.NDArray[np.float64],
@@ -800,10 +449,10 @@ class GL:
         arestas = np.stack([dy, -dx, ay * dx - ax * dy], axis=2)  # (T, 3, 3)
 
         min_x = np.maximum(0, np.floor(np.minimum(np.minimum(x0, x1), x2))).astype(np.int64)
-        max_x = np.minimum(GL.width - 1,
+        max_x = np.minimum(estado.width - 1,
                            np.ceil(np.maximum(np.maximum(x0, x1), x2))).astype(np.int64)
         min_y = np.maximum(0, np.floor(np.minimum(np.minimum(y0, y1), y2))).astype(np.int64)
-        max_y = np.minimum(GL.height - 1,
+        max_y = np.minimum(estado.height - 1,
                            np.ceil(np.maximum(np.maximum(y0, y1), y2))).astype(np.int64)
 
         return arestas, min_x, max_x, min_y, max_y
@@ -825,7 +474,7 @@ class GL:
         pequenos separados), esse custo fixo é maior que simplesmente deixar
         `GL._triangle_coverage` calcular a aresta/bbox daquele único
         triângulo inline, como fazia antes da vetorização em lote existir.
-        Por isso, abaixo de `GL._LOTE_MINIMO` triângulos, devolve listas de
+        Por isso, abaixo de `LOTE_MINIMO` triângulos, devolve listas de
         `None`: `GL._triangle_coverage` recebe `None` em `arestas`/`bbox` e
         calcula os dois na hora, por triângulo, sem o overhead da
         vetorização em lote.
@@ -854,7 +503,7 @@ class GL:
         """
         t = int(i0.size)
 
-        if t < GL._LOTE_MINIMO:
+        if t < LOTE_MINIMO:
             return [None] * t, [None] * t
 
         arestas_t, min_x, max_x, min_y, max_y = GL._batch_edges_and_bbox(tela_x, tela_y, i0, i1, i2)
@@ -909,7 +558,7 @@ class GL:
         Returns
         -------
         None
-            Escreve em GL.ms_buffer; não há retorno.
+            Escreve em estado.ms_buffer; não há retorno.
         """
         cobertura = GL._triangle_coverage(v0, v1, v2, arestas, bbox,
                                           escreve_profundidade=alpha >= 1.0)
@@ -966,7 +615,7 @@ class GL:
         profundidade de cada subamostra é interpolada com o peso baricêntrico
         BRUTO (não corrigido pela perspectiva, ao contrário de cor/textura,
         porque o z de NDC já é afim em coordenadas de tela, ver
-        `GL._project_points`) e comparada com `GL.depth_buffer`. Só as
+        `GL._project_points`) e comparada com `estado.depth_buffer`. Só as
         subamostras mais próximas da câmera do que o que já estava
         registrado sobrevivem e são as únicas devolvidas, o que resolve
         oclusão entre triângulos que se cruzam independente da ordem de
@@ -990,7 +639,7 @@ class GL:
             calcular na hora, sempre em conjunto com `arestas=None`.
         escreve_profundidade : bool, optional
             Se True (padrão), subamostras aprovadas no teste de z-buffer
-            atualizam `GL.depth_buffer` com a nova profundidade. Geometria
+            atualizam `estado.depth_buffer` com a nova profundidade. Geometria
             transparente passa False aqui: ela ainda é ocluída por (e testa
             contra) geometria mais próxima já desenhada, mas não grava sua
             própria profundidade, para não ocluir incorretamente outra
@@ -1002,7 +651,7 @@ class GL:
             None se o triângulo cai inteiramente fora da tela, ou se todas
             as subamostras cobertas perderam o teste de z-buffer. Senão,
             `(ys, xs, sy, sx, pesos)`: os 4 primeiros são índices em
-            `GL.ms_buffer` (linha, coluna, subamostra y, subamostra x) das K
+            `estado.ms_buffer` (linha, coluna, subamostra y, subamostra x) das K
             subamostras cobertas E aprovadas no teste de profundidade;
             `pesos` é um array (3, K) com o peso baricêntrico, já corrigido
             pela perspectiva, de v0, v1 e v2 (nessa ordem) em cada
@@ -1014,9 +663,9 @@ class GL:
 
         if bbox is None:
             min_x = max(0, math.floor(min(x0, x1, x2)))
-            max_x = min(GL.width - 1, math.ceil(max(x0, x1, x2)))
+            max_x = min(estado.width - 1, math.ceil(max(x0, x1, x2)))
             min_y = max(0, math.floor(min(y0, y1, y2)))
-            max_y = min(GL.height - 1, math.ceil(max(y0, y1, y2)))
+            max_y = min(estado.height - 1, math.ceil(max(y0, y1, y2)))
         else:
             min_x, max_x, min_y, max_y = bbox
 
@@ -1034,7 +683,7 @@ class GL:
                 a[:,  1] * d[:, 0] - a[:, 0] * d[:, 1],
             ])
 
-        m = GL.MSAA_AMOSTRAS
+        m = MSAA_AMOSTRAS
         desloc = (np.arange(m) + 0.5) / m
 
         # Cria uma grade de subamostras (m*m por pixel)
@@ -1076,9 +725,9 @@ class GL:
 
         # Teste de z-buffer: profundidade interpolada com o peso baricêntrico
         # bruto (afim em tela, sem correção de perspectiva) contra o valor já
-        # registrado em GL.depth_buffer para cada subamostra.
+        # registrado em estado.depth_buffer para cada subamostra.
         profundidade = pesos[0] * z0 + pesos[1] * z1 + pesos[2] * z2
-        prof_atual = GL.depth_buffer[ys_full, xs_full, sy_idx, sx_idx]
+        prof_atual = estado.depth_buffer[ys_full, xs_full, sy_idx, sx_idx]
         aprovado = profundidade <= prof_atual
 
         if not np.any(aprovado):
@@ -1089,7 +738,7 @@ class GL:
         pesos = pesos[:, aprovado]
 
         if escreve_profundidade:
-            GL.depth_buffer[ys_full, xs_full, sy_idx, sx_idx] = profundidade[aprovado]
+            estado.depth_buffer[ys_full, xs_full, sy_idx, sx_idx] = profundidade[aprovado]
 
         # Correção de perspectiva: divide cada peso pelo w do respectivo
         # vértice e renormaliza para voltar a somar 1.
@@ -1142,7 +791,7 @@ class GL:
         Returns
         -------
         None
-            Escreve em GL.ms_buffer; não há retorno.
+            Escreve em estado.ms_buffer; não há retorno.
         """
         cobertura = GL._triangle_coverage(v0, v1, v2, arestas, bbox,
                                           escreve_profundidade=alpha >= 1.0)
@@ -1154,119 +803,9 @@ class GL:
 
         cor = (pesos[0][:, None] * cor0 + pesos[1][:, None] * cor1
                + pesos[2][:, None] * cor2)
-        cor_rgb8 = np.clip(GL._round(cor * 255), 0, 255).astype(np.uint8)
+        cor_rgb8 = np.clip(piso(cor * 255), 0, 255).astype(np.uint8)
 
         GL._blend_write(ys, xs, sy, sx, cor_rgb8, alpha)
-
-    @staticmethod
-    def _select_mip_level(x0: float, y0: float, x1: float, y1: float, x2: float, y2: float,
-                          uv0: npt.NDArray[np.float64], uv1: npt.NDArray[np.float64],
-                          uv2: npt.NDArray[np.float64], largura: int, altura: int,
-                          n_niveis: int) -> int:
-        """
-        Escolhe o nível de mipmap a amostrar para um triângulo texturizado.
-
-        Compara a área do triângulo em pixels de tela com a área que ele
-        ocupa em texels da textura original (nível 0): quanto maior a razão
-        texels-por-pixel, mais a textura está sendo minificada (mais textura
-        precisa ser condensada em cada pixel de tela), e mais alto (mais
-        reduzido) deve ser o nível de mipmap amostrado, para que cada pixel
-        de tela amostre aproximadamente um texel do nível escolhido em vez
-        de descartar informação de alta frequência (aliasing) ao amostrar
-        direto do nível 0. Cada dobra de nível reduz a área em 4x (2x por
-        eixo), daí o log2 de base 4 (equivalente a `0.5 * log2(razão)`).
-
-        O nível é escolhido uma única vez por triângulo, não por pixel: o
-        resto do rasterizador (`GL._triangle_coverage`) também não calcula
-        derivadas por subamostra, então essa é a mesma granularidade de
-        aproximação já usada em todo o pipeline de textura.
-
-        Parameters
-        ----------
-        x0, y0, x1, y1, x2, y2 : float
-            Coordenadas de tela dos 3 vértices do triângulo.
-        uv0, uv1, uv2 : NDArray[float64]
-            Coordenada de textura [u, v] de cada vértice (na mesma ordem).
-        largura : int
-            Largura (texels) da textura no nível 0.
-        altura : int
-            Altura (texels) da textura no nível 0.
-        n_niveis : int
-            Quantidade de níveis disponíveis na cadeia de mipmaps.
-
-        Returns
-        -------
-        int
-            Índice do nível de mipmap a usar, em [0, n_niveis - 1].
-        """
-        area_tela = abs((x1 - x0) * (y2 - y0) - (y1 - y0) * (x2 - x0)) / 2
-
-        # Triângulo degenerado em tela (área ~0): não há como estimar a
-        # razão texel/pixel, usa-se o nível mais reduzido (cor média).
-        if area_tela <= 0:
-            return n_niveis - 1
-
-        area_uv = abs((uv1[0] - uv0[0]) * (uv2[1] - uv0[1])
-                      - (uv1[1] - uv0[1]) * (uv2[0] - uv0[0])) / 2
-        area_texel = area_uv * largura * altura
-
-        # Magnificação (menos texels que pixels, ou UV degenerado): nível 0,
-        # a textura já não tem detalhe demais para o espaço em tela.
-        if area_texel <= area_tela:
-            return 0
-
-        nivel = math.floor(0.5 * math.log2(area_texel / area_tela))
-        return int(np.clip(nivel, 0, n_niveis - 1))
-
-    @staticmethod
-    def _sample_texture(pesos: npt.NDArray[np.float64],
-                        verts: tuple[VerticeProjetado, VerticeProjetado, VerticeProjetado],
-                        uvs: tuple[npt.NDArray[np.float64], npt.NDArray[np.float64],
-                                   npt.NDArray[np.float64]],
-                        mipmaps: list[npt.NDArray[np.uint8]]) -> npt.NDArray[np.uint8]:
-        """
-        Amostra a textura nas subamostras cobertas de um triângulo.
-
-        Amostragem nearest-neighbor no nível de mipmap escolhido por
-        `GL._select_mip_level`, com wrap (repeat) das coordenadas UV fora de
-        [0, 1], que é o padrão X3D (`repeatS`/`repeatT` = TRUE).
-
-        Parameters
-        ----------
-        pesos : NDArray[float64]
-            Pesos baricêntricos perspectiva-corretos das subamostras, array
-            (3, K), devolvidos por `GL._triangle_coverage`.
-        verts : tuple[VerticeProjetado, VerticeProjetado, VerticeProjetado]
-            Vértices do triângulo, em coordenadas de tela.
-        uvs : tuple[NDArray[float64], NDArray[float64], NDArray[float64]]
-            Coordenada de textura [u, v] de cada vértice.
-        mipmaps : list[NDArray[uint8]]
-            Cadeia de mipmaps da textura (ver `GL._get_texture_mipmaps`).
-
-        Returns
-        -------
-        NDArray[uint8]
-            Cor RGB (K, 3) da textura em cada subamostra.
-        """
-        (x0, y0, *_), (x1, y1, *_), (x2, y2, *_) = verts
-        uv0, uv1, uv2 = uvs
-        uv = pesos[0][:, None] * uv0 + pesos[1][:, None] * uv1 + pesos[2][:, None] * uv2
-
-        largura0, altura0 = mipmaps[0].shape[0], mipmaps[0].shape[1]
-        nivel = GL._select_mip_level(x0, y0, x1, y1, x2, y2, uv0, uv1, uv2,
-                                     largura0, altura0, len(mipmaps))
-        textura = mipmaps[nivel]
-        largura, altura = textura.shape[0], textura.shape[1]
-
-        u = uv[:, 0] % 1.0
-        v = uv[:, 1] % 1.0
-
-        tx = np.clip((u * largura).astype(np.int64), 0, largura - 1)
-        # V=0 no X3D é a base da textura, mas a linha 0 da imagem (após o
-        # transpose de GPU.load_texture) é o topo, daí o (1 - v).
-        ty = np.clip(((1.0 - v) * altura).astype(np.int64), 0, altura - 1)
-
-        return textura[tx, ty, :3]
 
     @staticmethod
     def _scan_triangle_textured(v0: VerticeProjetado, uv0: npt.NDArray[np.float64],
@@ -1280,7 +819,7 @@ class GL:
         Varre um triângulo 2D com uma textura mapeada por coordenadas UV por vértice.
 
         Amostragem nearest-neighbor (sem filtragem bilinear) dentro do nível
-        de mipmap escolhido (ver `GL._select_mip_level`), com wrap (repeat)
+        de mipmap escolhido (ver `select_mip_level`), com wrap (repeat)
         das coordenadas UV fora de [0, 1], que é o padrão X3D
         (`repeatS`/`repeatT` = TRUE). A interpolação das coordenadas UV é
         corrigida pela perspectiva (ver `GL._triangle_coverage`), senão a
@@ -1301,7 +840,7 @@ class GL:
             Coordenada de textura [u, v] de cada vértice (na mesma ordem).
         mipmaps : list[NDArray[uint8]]
             Cadeia de mipmaps da textura, do nível 0 (original) ao 1x1,
-            no formato devolvido por `GL._get_texture_mipmaps` (cada nível
+            no formato devolvido por `get_texture_mipmaps` (cada nível
             com eixos [u][v], como `gpu.GPU.load_texture`).
         arestas : NDArray[float64] or None
             Coeficientes de aresta do triângulo, array (3, 3), devolvido
@@ -1317,7 +856,7 @@ class GL:
         Returns
         -------
         None
-            Escreve em GL.ms_buffer; não há retorno.
+            Escreve em estado.ms_buffer; não há retorno.
         """
         cobertura = GL._triangle_coverage(v0, v1, v2, arestas, bbox,
                                           escreve_profundidade=alpha >= 1.0)
@@ -1327,213 +866,9 @@ class GL:
 
         ys, xs, sy, sx, pesos = cobertura
 
-        cor = GL._sample_texture(pesos, (v0, v1, v2), (uv0, uv1, uv2), mipmaps)
+        cor = sample_texture(pesos, (v0, v1, v2), (uv0, uv1, uv2), mipmaps)
 
         GL._blend_write(ys, xs, sy, sx, cor, alpha)
-
-    @staticmethod
-    def _get_texture(current_texture: list[str]) -> npt.NDArray[np.uint8] | None:
-        """
-        Carrega (com cache) a textura atual do Appearance.
-
-        Parameters
-        ----------
-        current_texture : list[str]
-            Caminho(s) da textura atual do Appearance/ImageTexture; usa-se
-            apenas o primeiro, como o restante da GL faz para as demais
-            propriedades resolvidas do Appearance.
-
-        Returns
-        -------
-        NDArray[uint8] or None
-            Matriz de pixels da textura (eixos [u][v], como devolvido por
-            `gpu.GPU.load_texture`), ou None se `current_texture` estiver vazio.
-        """
-        if not current_texture:
-            return None
-
-        nome = current_texture[0]
-
-        if nome not in GL._texture_cache:
-            GL._texture_cache[nome] = gpu.GPU.load_texture(nome)
-
-        return GL._texture_cache[nome]
-
-    @staticmethod
-    def _build_mipmaps(textura: npt.NDArray[np.uint8]) -> list[npt.NDArray[np.uint8]]:
-        """
-        Gera a cadeia de mipmaps de uma textura por filtragem de caixa.
-
-        Cada nível seguinte tem metade da resolução do anterior (uma
-        dimensão ímpar tem sua última linha/coluna duplicada antes de
-        reduzir, para que só existam blocos 2x2 completos de texels) e é
-        obtido pela média de cada bloco 2x2 de texels do nível anterior.
-        Isso pré-filtra a alta frequência espacial da textura em cada
-        redução, ao contrário de simplesmente pular texels (nearest-
-        neighbor na redução), que preservaria aliasing em vez de eliminá-lo.
-        A cadeia termina no nível 1x1, a cor média de toda a textura.
-
-        Parameters
-        ----------
-        textura : NDArray[uint8]
-            Nível 0 (textura original), no formato devolvido por
-            `gpu.GPU.load_texture` (eixos [u][v]).
-
-        Returns
-        -------
-        list[NDArray[uint8]]
-            Cadeia de mipmaps, do nível 0 (original) ao 1x1, nessa ordem.
-        """
-        niveis = [textura]
-        atual = textura
-
-        while atual.shape[0] > 1 or atual.shape[1] > 1:
-            if atual.shape[0] % 2:
-                atual = np.concatenate([atual, atual[-1:, :, :]], axis=0)
-            if atual.shape[1] % 2:
-                atual = np.concatenate([atual, atual[:, -1:, :]], axis=1)
-
-            blocos = atual.astype(np.float64).reshape(
-                atual.shape[0] // 2, 2, atual.shape[1] // 2, 2, atual.shape[2])
-            atual = GL._round(blocos.mean(axis=(1, 3))).astype(np.uint8)
-
-            niveis.append(atual)
-
-        return niveis
-
-    @staticmethod
-    def _get_texture_mipmaps(current_texture: list[str]) -> list[npt.NDArray[np.uint8]] | None:
-        """
-        Carrega (com cache) a cadeia de mipmaps da textura atual do Appearance.
-
-        Reaproveita o cache de textura de `GL._get_texture` para o nível 0 e
-        constrói (uma única vez por textura, também cacheada) o restante da
-        cadeia com `GL._build_mipmaps`.
-
-        Parameters
-        ----------
-        current_texture : list[str]
-            Caminho(s) da textura atual do Appearance/ImageTexture; usa-se
-            apenas o primeiro, como o restante da GL faz para as demais
-            propriedades resolvidas do Appearance.
-
-        Returns
-        -------
-        list[NDArray[uint8]] or None
-            Cadeia de mipmaps (ver `GL._build_mipmaps`), ou None se
-            `current_texture` estiver vazio.
-        """
-        if not current_texture:
-            return None
-
-        nome = current_texture[0]
-
-        if nome not in GL._mipmap_cache:
-            textura = GL._get_texture(current_texture)
-            assert textura is not None
-            GL._mipmap_cache[nome] = GL._build_mipmaps(textura)
-
-        return GL._mipmap_cache[nome]
-
-    @staticmethod
-    def _fan_triangulate(idxs: npt.NDArray[np.int64]
-                         ) -> tuple[npt.NDArray[np.int64], npt.NDArray[np.int64],
-                                    npt.NDArray[np.int64], npt.NDArray[np.int64]]:
-        """
-        Triangula em leque uma lista de faces separadas por -1.
-
-        Cada face é triangulada em leque a partir do seu primeiro vértice:
-        (v0, v1, v2), (v0, v2, v3), (v0, v3, v4), ... : Usado tanto para os
-        índices de vértice (`coordIndex`) quanto, com a mesma estrutura de
-        faces, para os de cor (`colorIndex`) e de textura (`texCoordIndex`).
-
-        Parameters
-        ----------
-        idxs : NDArray[int64]
-            Índices concatenados de várias faces, com -1 separando cada uma.
-
-        Returns
-        -------
-        NDArray[int64]
-            i0 — índice do primeiro vértice do leque de cada triângulo.
-        NDArray[int64]
-            i1 — índice do segundo vértice de cada triângulo, mesmo tamanho de i0.
-        NDArray[int64]
-            i2 — índice do terceiro vértice de cada triângulo, mesmo tamanho de i0.
-        NDArray[int64]
-            face_id — posição, na lista de faces (contando as descartadas por
-            terem menos de 3 vértices), da face de origem de cada triângulo.
-        """
-        cortes = np.nonzero(idxs == -1)[0]
-        faces: list[npt.NDArray[np.int64]] = [
-            segmento[segmento != -1] for segmento in np.split(idxs, cortes)]
-
-        i0_partes: list[npt.NDArray[np.int64]] = []
-        i1_partes: list[npt.NDArray[np.int64]] = []
-        i2_partes: list[npt.NDArray[np.int64]] = []
-        face_partes: list[npt.NDArray[np.int64]] = []
-
-        for fid, face in enumerate(faces):
-            if face.size < 3:
-                continue
-
-            n_tri = face.size - 2
-
-            i0_partes.append(np.full(n_tri, face[0]))
-            i1_partes.append(face[1:-1])
-            i2_partes.append(face[2:])
-
-            face_partes.append(np.full(n_tri, fid))
-
-        if not i0_partes:
-            vazio = np.empty(0, dtype=np.int64)
-
-            return vazio, vazio, vazio, vazio
-
-        return (np.concatenate(i0_partes), np.concatenate(i1_partes),
-                np.concatenate(i2_partes), np.concatenate(face_partes))
-
-    @staticmethod
-    def _fan_triangulate_cached(idxs: list[int]
-                                ) -> tuple[npt.NDArray[np.int64], npt.NDArray[np.int64],
-                                           npt.NDArray[np.int64], npt.NDArray[np.int64]]:
-        """
-        Versão cacheada de `GL._fan_triangulate`, por identidade da lista de índices.
-
-        Um nó de geometria é parseado uma única vez do XML na carga da
-        cena; suas listas de índices (`coordIndex`, `colorIndex`,
-        `texCoordIndex`) são os mesmos objetos de lista reusados a cada
-        frame renderizado, para malhas estáticas (nada no grafo de cena
-        substitui essas listas depois do parse). Cachear o resultado da
-        triangulação em leque por `id()` da lista evita repetir esse
-        trabalho a cada frame para uma malha que não muda: o ganho cresce
-        com o número de vértices da malha e o número de frames
-        renderizados, o caso comum de uma cena parada ou com só a câmera
-        se movendo.
-
-        A chave usada é a identidade do objeto Python (`id()`), não o seu
-        conteúdo: é seguro aqui porque os nós do grafo de cena, e portanto
-        suas listas de índice, permanecem vivos durante toda a sessão de
-        renderização (nunca são descartados nem substituídos por outro
-        objeto), então o mesmo `id()` nunca passa a apontar para uma lista
-        de conteúdo diferente entre uma chamada e outra.
-
-        Parameters
-        ----------
-        idxs : list[int]
-            Índices concatenados de várias faces, com -1 separando cada
-            uma (mesmo formato de `GL._fan_triangulate`).
-
-        Returns
-        -------
-        Mesmo retorno de `GL._fan_triangulate`.
-        """
-        chave = id(idxs)
-
-        if chave not in GL._fan_cache:
-            GL._fan_cache[chave] = GL._fan_triangulate(np.asarray(idxs, dtype=np.int64))
-
-        return GL._fan_cache[chave]
 
     @staticmethod
     def polypoint2D(point: list[float], colors: Colors) -> None:
@@ -1552,11 +887,11 @@ class GL:
         Returns
         -------
         None
-            A função escreve no buffer de multisample da GL (GL.ms_buffer); o resultado
+            A função escreve no buffer de multisample da GL (estado.ms_buffer); o resultado
             retorno.
         """
-        cor = GL._to_rgb8(colors["emissiveColor"])
-        pontos = GL._round(np.asarray(point).reshape(-1, 2)).astype(np.int64)
+        cor = to_rgb8(colors["emissiveColor"])
+        pontos = piso(np.asarray(point).reshape(-1, 2)).astype(np.int64)
 
         GL._draw_points(pontos[:, 0], pontos[:, 1], cor)
 
@@ -1578,10 +913,10 @@ class GL:
         Returns
         -------
         None
-            A função escreve no buffer de multisample da GL (GL.ms_buffer); não há
+            A função escreve no buffer de multisample da GL (estado.ms_buffer); não há
             retorno.
         """
-        cor = GL._to_rgb8(colors["emissiveColor"])
+        cor = to_rgb8(colors["emissiveColor"])
         pontos = np.asarray(lineSegments, dtype=np.float64).reshape(-1, 2)
 
         for (x0, y0), (x1, y1) in zip(pontos[:-1].tolist(), pontos[1:].tolist()):
@@ -1604,10 +939,10 @@ class GL:
         Returns
         -------
         None
-            A função escreve no buffer de multisample da GL (GL.ms_buffer); não há
+            A função escreve no buffer de multisample da GL (estado.ms_buffer); não há
             retorno.
         """
-        cor = GL._to_rgb8(colors["emissiveColor"])
+        cor = to_rgb8(colors["emissiveColor"])
         r = round(radius)
 
         # Sem For: Calcula octante aplica as matrizes identidade e
@@ -1615,7 +950,7 @@ class GL:
 
         # Calcula um único octante (0 <= x <= y)
         xs_octant = np.arange(0, int(r / math.sqrt(2)) + 1, dtype=np.float64)
-        ys_octant = GL._round(np.sqrt(r ** 2 - xs_octant ** 2))
+        ys_octant = piso(np.sqrt(r ** 2 - xs_octant ** 2))
 
         octant = np.stack([xs_octant, ys_octant], axis=1)  # (N, 2)
 
@@ -1642,17 +977,16 @@ class GL:
         Returns
         -------
         None
-            A função escreve no buffer de multisample da GL (GL.ms_buffer); não há
+            A função escreve no buffer de multisample da GL (estado.ms_buffer); não há
             retorno.
         """
-        cor = GL._to_rgb8(colors["emissiveColor"])
+        cor = to_rgb8(colors["emissiveColor"])
 
         for i in range(0, len(vertices) - 5, 6):
 
             GL._scan_triangle(vertices[i], vertices[i + 1],
                               vertices[i + 2], vertices[i + 3],
                               vertices[i + 4], vertices[i + 5], cor)
-
 
     @staticmethod
     def _project_points(point: list[float]
@@ -1698,7 +1032,7 @@ class GL:
             perspectiva.
         """
         # Matriz completa: objeto -> mundo -> câmera -> clip.
-        transformacao = GL.perspective_matrix @ GL.view_matrix @ GL.transform_stack[-1]
+        transformacao = estado.perspective_matrix @ estado.view_matrix @ estado.transform_stack[-1]
 
         pontos = np.asarray(point, dtype=np.float64).reshape(-1, 3)
         homogeneos = np.hstack([pontos, np.ones((pontos.shape[0], 1))])
@@ -1708,8 +1042,8 @@ class GL:
         ndc = clip[:, :3] / clip[:, 3:4]
 
         # Mapeia de NDC ([-1, 1]) para coordenadas de tela (eixo y invertido).
-        tela_x = (ndc[:, 0] + 1) / 2 * GL.width
-        tela_y = (1 - ndc[:, 1]) / 2 * GL.height
+        tela_x = (ndc[:, 0] + 1) / 2 * estado.width
+        tela_y = (1 - ndc[:, 1]) / 2 * estado.height
 
         return tela_x, tela_y, clip[:, 3], ndc[:, 2]
 
@@ -1774,7 +1108,7 @@ class GL:
         Returns
         -------
         None
-            A função escreve no buffer de multisample da GL (GL.ms_buffer); não há
+            A função escreve no buffer de multisample da GL (estado.ms_buffer); não há
             retorno.
         """
         tela_x, tela_y, tela_w, tela_z = GL._project_points(point)
@@ -1815,17 +1149,17 @@ class GL:
         Returns
         -------
         None
-            Atualiza GL.view_matrix e GL.perspective_matrix; não há retorno.
+            Atualiza estado.view_matrix e estado.perspective_matrix; não há retorno.
         """
         # Matriz de transformação da câmera (câmera -> mundo): rotação seguida de translação.
-        camera_para_mundo = GL._translation_matrix(position) @ GL._rotation_matrix(orientation)
+        camera_para_mundo = translation_matrix(position) @ rotation_matrix(orientation)
 
         # A view é a inversa: para uma matriz de rotação + translação, a inversa é a
         # transposta do bloco de rotação seguida da translação negada.
-        GL.view_matrix = np.linalg.inv(camera_para_mundo)
-        GL.camera_position = np.asarray(position, dtype=np.float64)
+        estado.view_matrix = np.linalg.inv(camera_para_mundo)
+        estado.camera_position = np.asarray(position, dtype=np.float64)
 
-        aspect = GL.width / GL.height
+        aspect = estado.width / estado.height
 
         # O fieldOfView do X3D se aplica à menor dimensão da tela sem alteração; a maior
         # dimensão recebe o ângulo mais largo, calculado a partir da razão de aspecto.
@@ -1834,7 +1168,7 @@ class GL:
         else:  # tela mais alta que larga: a horizontal (menor) recebe o fov cru
             fovy = 2 * math.atan(math.tan(fieldOfView / 2) / aspect)
 
-        GL.perspective_matrix = GL._perspective_matrix(fovy, aspect, GL.near, GL.far)
+        estado.perspective_matrix = perspective_matrix(fovy, aspect, estado.near, estado.far)
 
     @staticmethod
     def transform_in(translation: list[float], scale: list[float], rotation: list[float]) -> None:
@@ -1862,7 +1196,7 @@ class GL:
         Returns
         -------
         None
-            Empilha a matriz resultante em GL.transform_stack.
+            Empilha a matriz resultante em estado.transform_stack.
         """
         t = translation if translation else [0.0, 0.0, 0.0]
         s = scale if scale else [1.0, 1.0, 1.0]
@@ -1870,10 +1204,10 @@ class GL:
 
         # Ordem de aplicação em um ponto local: primeiro escala, depois rotação,
         # depois translação — ou seja, local_para_pai = T @ R @ S.
-        local_para_pai = GL._translation_matrix(t) @ GL._rotation_matrix(r) @ GL._scale_matrix(s)
+        local_para_pai = translation_matrix(t) @ rotation_matrix(r) @ scale_matrix(s)
 
-        local_para_mundo = GL.transform_stack[-1] @ local_para_pai
-        GL.transform_stack.append(local_para_mundo)
+        local_para_mundo = estado.transform_stack[-1] @ local_para_pai
+        estado.transform_stack.append(local_para_mundo)
 
     @staticmethod
     def transform_out() -> None:
@@ -1886,62 +1220,9 @@ class GL:
         Returns
         -------
         None
-            Remove o topo de GL.transform_stack.
+            Remove o topo de estado.transform_stack.
         """
-        GL.transform_stack.pop()
-
-    @staticmethod
-    def _strip_triangle_indices(tiras: list[npt.NDArray[np.int64]]
-                                ) -> tuple[npt.NDArray[np.int64], npt.NDArray[np.int64],
-                                           npt.NDArray[np.int64]]:
-        """
-        Calcula os triplos (i0, i1, i2) de todos os triângulos de todas as tiras.
-
-        Uma tira alterna o sentido "cru" da sequência a cada triângulo (0,1,2 depois
-        1,2,3 depois 2,3,4...); para manter o mesmo sentido (anti-horário) em todos
-        os triângulos gerados, os dois primeiros índices são trocados nos triângulos
-        de posição ímpar dentro da tira.
-
-        Parameters
-        ----------
-        tiras : list[NDArray[int64]]
-            Lista de tiras, cada uma um array com os índices de vértice, na
-            ordem em que aparecem na tira. Tiras com menos de 3 índices são
-            ignoradas (não geram triângulo).
-
-        Returns
-        -------
-        NDArray[int64]
-            Índices do primeiro vértice de cada triângulo, de todas as tiras
-            concatenadas.
-        NDArray[int64]
-            Índices do segundo vértice de cada triângulo, mesmo tamanho do
-            primeiro retorno.
-        NDArray[int64]
-            Índices do terceiro vértice de cada triângulo, mesmo tamanho do
-            primeiro retorno.
-        """
-        i0_partes: list[npt.NDArray[np.int64]] = []
-        i1_partes: list[npt.NDArray[np.int64]] = []
-        i2_partes: list[npt.NDArray[np.int64]] = []
-
-        for tira in tiras:
-            n = tira.size
-
-            if n < 3:
-                continue
-
-            i = np.arange(n - 2)
-            par = i % 2 == 0
-            i0_partes.append(np.where(par, tira[i], tira[i + 1]))
-            i1_partes.append(np.where(par, tira[i + 1], tira[i]))
-            i2_partes.append(tira[i + 2])
-
-        if not i0_partes:
-            vazio = np.empty(0, dtype=np.int64)
-            return vazio, vazio, vazio
-
-        return (np.concatenate(i0_partes), np.concatenate(i1_partes), np.concatenate(i2_partes))
+        estado.transform_stack.pop()
 
     @staticmethod
     def triangleStripSet(point: list[float], stripCount: list[int], colors: Colors) -> None:
@@ -1972,7 +1253,7 @@ class GL:
         Returns
         -------
         None
-            A função escreve no buffer de multisample da GL (GL.ms_buffer); não há
+            A função escreve no buffer de multisample da GL (estado.ms_buffer); não há
             retorno.
         """
         tela_x, tela_y, tela_w, tela_z = GL._project_points(point)
@@ -1987,7 +1268,7 @@ class GL:
         tiras: list[npt.NDArray[np.int64]] = [
             np.arange(offsets[i], offsets[i + 1]) for i in range(len(counts))]
 
-        i0, i1, i2 = GL._strip_triangle_indices(tiras)
+        i0, i1, i2 = strip_triangle_indices(tiras)
 
         # Back-Face Culling: descartar triângulos de costas para a câmera antes de rasterizar
         frente = GL._front_facing_mask(tela_x, tela_y, i0, i1, i2)
@@ -2030,7 +1311,7 @@ class GL:
         Returns
         -------
         None
-            A função escreve no buffer de multisample da GL (GL.ms_buffer); não há
+            A função escreve no buffer de multisample da GL (estado.ms_buffer); não há
             retorno.
         """
         tela_x, tela_y, tela_w, tela_z = GL._project_points(point)
@@ -2043,7 +1324,7 @@ class GL:
             segmento[segmento != -1] for segmento in np.split(idx, cortes)
         ]
 
-        i0, i1, i2 = GL._strip_triangle_indices(tiras)
+        i0, i1, i2 = strip_triangle_indices(tiras)
         frente = GL._front_facing_mask(tela_x, tela_y, i0, i1, i2)
         i0, i1, i2 = i0[frente], i1[frente], i2[frente]
 
@@ -2111,13 +1392,13 @@ class GL:
             ou a topologia não bate e o chamador deve tentar outro
             preenchimento.
         """
-        mipmaps = GL._get_texture_mipmaps(current_texture) if texCoord and current_texture else None
+        mipmaps = get_texture_mipmaps(current_texture) if texCoord and current_texture else None
 
         if mipmaps is None:
             return False
 
         tidx = texCoordIndex if texCoordIndex else coordIndex
-        ti0, ti1, ti2, _ = GL._fan_triangulate_cached(tidx)
+        ti0, ti1, ti2, _ = fan_triangulate_cached(tidx)
 
         if ti0.size != frente.size:
             return False
@@ -2184,7 +1465,7 @@ class GL:
             topologia não bate e o chamador deve tentar outro preenchimento.
         """
         cores = np.asarray(color, dtype=np.float64).reshape(-1, 3)
-        ci0, ci1, ci2, _ = GL._fan_triangulate_cached(colorIndex if colorIndex else coordIndex)
+        ci0, ci1, ci2, _ = fan_triangulate_cached(colorIndex if colorIndex else coordIndex)
 
         if ci0.size != frente.size:
             return False
@@ -2244,7 +1525,7 @@ class GL:
         Returns
         -------
         None
-            A função escreve no buffer de multisample da GL (GL.ms_buffer); não há
+            A função escreve no buffer de multisample da GL (estado.ms_buffer); não há
             retorno.
         """
         cores = np.asarray(color, dtype=np.float64).reshape(-1, 3)
@@ -2254,7 +1535,7 @@ class GL:
         else:
             color_idx_por_tri = face_id
 
-        cor_tri = GL._to_rgb8(cores[color_idx_por_tri])
+        cor_tri = to_rgb8(cores[color_idx_por_tri])
 
         for t, (a, b, c, cor) in enumerate(zip(idx0, idx1, idx2, cor_tri)):
             GL._scan_triangle_depth(verts[a], verts[b], verts[c],
@@ -2317,12 +1598,12 @@ class GL:
         Returns
         -------
         None
-            A função escreve no buffer de multisample da GL (GL.ms_buffer); não há
+            A função escreve no buffer de multisample da GL (estado.ms_buffer); não há
             retorno.
         """
         tela_x, tela_y, tela_w, tela_z = GL._project_points(coord)
 
-        i0, i1, i2, face_id = GL._fan_triangulate_cached(coordIndex)
+        i0, i1, i2, face_id = fan_triangulate_cached(coordIndex)
 
         if i0.size == 0:
             return
@@ -2368,231 +1649,6 @@ class GL:
         GL._fill_triangles(coord, verts, i0, i1, i2, arestas_l, bboxes, colors)
 
     @staticmethod
-    def _circle_xz(segmentos: int) -> tuple[npt.NDArray[np.float64], npt.NDArray[np.float64]]:
-        """
-        Gera os cossenos e senos de uma volta completa, usados nos anéis de cone e cilindro.
-
-        Parameters
-        ----------
-        segmentos : int
-            Quantidade de fatias da volta.
-
-        Returns
-        -------
-        NDArray[float64]
-            Cosseno de cada ângulo, com `segmentos + 1` valores (o último
-            repete o primeiro, para fechar a costura sem reindexar).
-        NDArray[float64]
-            Seno de cada ângulo, mesmo tamanho do retorno anterior.
-        """
-        angulos = np.linspace(0.0, 2 * math.pi, segmentos + 1)
-        return np.cos(angulos), np.sin(angulos)
-
-    @staticmethod
-    def _cap_mesh(raio: float, y: float, normal_y: float, segmentos: int, base: int
-                  ) -> Malha:
-        """
-        Gera uma tampa circular (disco) em triângulos, com normal ao longo de Y.
-
-        Parameters
-        ----------
-        raio : float
-            Raio do disco.
-        y : float
-            Altura do plano do disco, em coordenadas de objeto.
-        normal_y : float
-            Sentido da normal: +1 para tampa voltada para cima, -1 para baixo.
-        segmentos : int
-            Quantidade de fatias do disco.
-        base : int
-            Índice do primeiro vértice da tampa na malha final, somado aos
-            índices dos triângulos para que apontem para os vértices certos.
-
-        Returns
-        -------
-        Malha
-            Posições, normais, triângulos (índices já deslocados por `base`)
-            e UVs do disco, em ordem anti-horária vista de fora. Os UVs são
-            um recorte circular da textura (centro em (0.5, 0.5), raio 0.5),
-            com a imagem em pé vista de fora: na tampa de cima, com o fundo
-            (-Z) para o alto da imagem; na de baixo, com +Z para o alto.
-        """
-        c, s = GL._circle_xz(segmentos)
-        anel = np.stack([raio * c, np.full_like(c, y), raio * s], axis=1)
-        posicoes = np.vstack([[0.0, y, 0.0], anel])
-        normais = np.tile([0.0, normal_y, 0.0], (len(posicoes), 1))
-        sentido_v = -normal_y  # vista de baixo, o alto da imagem passa de -Z para +Z
-        uv = 0.5 + 0.5 * np.stack([posicoes[:, 0], sentido_v * posicoes[:, 2]], axis=1) / raio
-
-        j = np.arange(segmentos)
-        centro = np.zeros(segmentos, dtype=np.int64)
-        atual, proximo = j + 1, j + 2
-        # Vista de cima, φ crescente é horário; a tampa de baixo inverte a ordem.
-        pares = (proximo, atual) if normal_y > 0 else (atual, proximo)
-        triangulos = np.stack([centro, pares[0], pares[1]], axis=1) + base
-        return posicoes, normais, triangulos, uv
-
-    @staticmethod
-    def _join_meshes(malhas: list[Malha]) -> Malha:
-        """
-        Concatena várias malhas numa só, reindexando os triângulos.
-
-        Parameters
-        ----------
-        malhas : list[Malha]
-            Malhas cujos triângulos indexam apenas os próprios vértices.
-
-        Returns
-        -------
-        Malha
-            Malha única com os vértices, normais, triângulos e UVs de todas.
-        """
-        deslocamento = np.cumsum([0] + [len(m[0]) for m in malhas[:-1]])
-        posicoes = np.vstack([m[0] for m in malhas])
-        normais = np.vstack([m[1] for m in malhas])
-        triangulos = np.vstack([m[2] + d for m, d in zip(malhas, deslocamento)])
-        uv = np.vstack([m[3] for m in malhas])
-        return posicoes, normais, triangulos, uv
-
-    @staticmethod
-    def _side_mesh(raio_topo: float, raio_base: float, altura: float, segmentos: int,
-                   normal_y: float) -> Malha:
-        """
-        Gera a superfície lateral de um cone ou cilindro (anel de cima e anel de baixo).
-
-        Os vértices são duplicados em cada fatia (e a costura repetida), para
-        que cada fatia tenha a própria normal e a lateral fique suave.
-
-        Parameters
-        ----------
-        raio_topo : float
-            Raio do anel de cima (0 para um cone, com o vértice no topo).
-        raio_base : float
-            Raio do anel de baixo.
-        altura : float
-            Altura total; o sólido fica centrado na origem em Y.
-        segmentos : int
-            Quantidade de fatias.
-        normal_y : float
-            Componente Y (antes de normalizar) da normal lateral: 0 para
-            cilindro e `raio_base` para cone, junto com o componente
-            horizontal `altura`.
-
-        Returns
-        -------
-        Malha
-            Posições, normais, triângulos e UVs da lateral, em ordem
-            anti-horária vista de fora. A textura dá a volta no sentido
-            anti-horário visto de cima, a partir do fundo (-Z): u vale 0 no
-            fundo, e o desenrolado (sem módulo) evita um salto de UV na
-            costura da malha. v vai de 0 na base a 1 no topo.
-        """
-        c, s = GL._circle_xz(segmentos)
-        topo = np.stack([raio_topo * c, np.full_like(c, altura / 2), raio_topo * s], axis=1)
-        base = np.stack([raio_base * c, np.full_like(c, -altura / 2), raio_base * s], axis=1)
-        horizontal = altura if normal_y else 1.0
-        n = np.stack([horizontal * c, np.full_like(c, normal_y), horizontal * s], axis=1)
-        n /= np.linalg.norm(n, axis=1, keepdims=True)
-
-        j = np.arange(segmentos)
-        t, t1 = j, j + 1
-        b, b1 = j + segmentos + 1, j + segmentos + 2
-        triangulos = np.vstack([np.stack([b1, b, t], axis=1), np.stack([b1, t, t1], axis=1)])
-        if raio_topo == 0:  # cone: o segundo triângulo do quad degenera no vértice
-            triangulos = triangulos[:segmentos]
-        u = 0.75 - np.arange(segmentos + 1) / segmentos
-        uv = np.vstack([np.stack([u, np.ones_like(u)], axis=1),
-                        np.stack([u, np.zeros_like(u)], axis=1)])
-        return np.vstack([topo, base]), np.vstack([n, n]), triangulos, uv
-
-    @staticmethod
-    def _box_mesh(tamanho: tuple[float, float, float]) -> Malha:
-        """
-        Gera a malha de um Box centrado na origem, com 4 vértices por face.
-
-        Parameters
-        ----------
-        tamanho : tuple[float, float, float]
-            Extensões da caixa ao longo de X, Y e Z.
-
-        Returns
-        -------
-        Malha
-            24 vértices (normais planas por face), 12 triângulos e, em cada
-            face, a textura inteira (U para a direita e V para cima vistos de fora).
-        """
-        meio = np.asarray(tamanho, dtype=np.float64) / 2
-        # Cada face: normal e 4 cantos em ordem anti-horária vista de fora.
-        faces = [
-            ((0, 0, 1), [(-1, -1, 1), (1, -1, 1), (1, 1, 1), (-1, 1, 1)]),
-            ((0, 0, -1), [(1, -1, -1), (-1, -1, -1), (-1, 1, -1), (1, 1, -1)]),
-            ((1, 0, 0), [(1, -1, 1), (1, -1, -1), (1, 1, -1), (1, 1, 1)]),
-            ((-1, 0, 0), [(-1, -1, -1), (-1, -1, 1), (-1, 1, 1), (-1, 1, -1)]),
-            ((0, 1, 0), [(-1, 1, 1), (1, 1, 1), (1, 1, -1), (-1, 1, -1)]),
-            ((0, -1, 0), [(-1, -1, -1), (1, -1, -1), (1, -1, 1), (-1, -1, 1)]),
-        ]
-        posicoes = np.array([c for _, cantos in faces for c in cantos], dtype=np.float64) * meio
-        normais = np.array([n for n, _ in faces for _ in range(4)], dtype=np.float64)
-        quad = np.array([[0, 1, 2], [0, 2, 3]])
-        triangulos = np.vstack([quad + 4 * f for f in range(len(faces))])
-        return posicoes, normais, triangulos, np.tile(GL._BOX_FACE_UV, (len(faces), 1))
-
-    @staticmethod
-    def _sphere_mesh(raio: float) -> Malha:
-        """
-        Gera a malha de uma Sphere centrada na origem (latitude por longitude).
-
-        Parameters
-        ----------
-        raio : float
-            Raio da esfera.
-
-        Returns
-        -------
-        Malha
-            Vértices, normais (direção radial), triângulos e UVs; nos polos os
-            triângulos degenerados têm área zero e são descartados pelo culling.
-            A textura dá a volta no sentido anti-horário visto de cima, a
-            partir do fundo (-Z), com v = 1 no polo norte (ver `GL._side_mesh`).
-        """
-        faixas, fatias = GL._SPHERE_FAIXAS, GL._SEGMENTOS
-        theta = np.linspace(0.0, math.pi, faixas + 1)[:, None]
-        phi = np.linspace(0.0, 2 * math.pi, fatias + 1)[None, :]
-        normais = np.stack([np.sin(theta) * np.cos(phi),
-                            np.cos(theta) * np.ones_like(phi),
-                            np.sin(theta) * np.sin(phi)], axis=-1).reshape(-1, 3)
-
-        i, j = np.meshgrid(np.arange(faixas), np.arange(fatias), indexing="ij")
-        a = (i * (fatias + 1) + j).ravel()
-        b, c, d = a + 1, a + fatias + 1, a + fatias + 2
-        triangulos = np.vstack([np.stack([d, c, a], axis=1), np.stack([d, a, b], axis=1)])
-        u = np.broadcast_to(0.75 - phi / (2 * math.pi), (faixas + 1, fatias + 1))
-        v = np.broadcast_to(1.0 - theta / math.pi, (faixas + 1, fatias + 1))
-        uv = np.stack([u, v], axis=-1).reshape(-1, 2)
-        return normais * raio, normais, triangulos, uv
-
-    @staticmethod
-    def _cached_mesh(chave: tuple[object, ...], construir: Callable[[], Malha]) -> Malha:
-        """
-        Devolve a malha de uma primitiva, construindo-a só na primeira vez.
-
-        Parameters
-        ----------
-        chave : tuple[object, ...]
-            Identifica a primitiva e seus parâmetros (por exemplo, `("box", x, y, z)`).
-        construir : Callable[[], Malha]
-            Função sem argumentos que gera a malha quando não está em cache.
-
-        Returns
-        -------
-        Malha
-            Malha da primitiva, compartilhada entre frames.
-        """
-        if chave not in GL._mesh_cache:
-            GL._mesh_cache[chave] = construir()
-        return GL._mesh_cache[chave]
-
-    @staticmethod
     def _to_world(posicoes: npt.NDArray[np.float64], normais: npt.NDArray[np.float64] | None
                   ) -> tuple[npt.NDArray[np.float64], npt.NDArray[np.float64] | None]:
         """
@@ -2617,7 +1673,7 @@ class GL:
         NDArray[float64] or None
             Normais unitárias (N, 3) em coordenadas de mundo, ou None.
         """
-        modelo = GL.transform_stack[-1]
+        modelo = estado.transform_stack[-1]
         mundo = posicoes @ modelo[:3, :3].T + modelo[:3, 3]
         if normais is None:
             return mundo, None
@@ -2666,17 +1722,17 @@ class GL:
         """
         emissiva = np.asarray(colors["emissiveColor"], dtype=np.float64)
         resultado = np.tile(emissiva, (len(pos), 1))
-        if not GL.lights:
+        if not estado.lights:
             return resultado
 
         if difusa is None:
             difusa = np.asarray(colors["diffuseColor"], dtype=np.float64)
         especular = np.asarray(colors["specularColor"], dtype=np.float64)
         expoente = colors["shininess"] * 128.0
-        para_camera = GL.camera_position - pos
+        para_camera = estado.camera_position - pos
         para_camera /= np.maximum(np.linalg.norm(para_camera, axis=1, keepdims=True), 1e-12)
 
-        for luz in GL.lights:
+        for luz in estado.lights:
             para_luz = -luz["direcao"]
             n_l = np.maximum(normal @ para_luz, 0.0)[:, None]
             meio = para_camera + para_luz
@@ -2727,7 +1783,7 @@ class GL:
         Returns
         -------
         None
-            Escreve em GL.ms_buffer; não há retorno.
+            Escreve em estado.ms_buffer; não há retorno.
         """
         cobertura = GL._triangle_coverage(v0, v1, v2, arestas, bbox,
                                           escreve_profundidade=alpha >= 1.0)
@@ -2740,13 +1796,13 @@ class GL:
         difusa = None
         if textura is not None:
             mipmaps, uv3 = textura
-            difusa = GL._sample_texture(pesos, (v0, v1, v2), (uv3[0], uv3[1], uv3[2]),
+            difusa = sample_texture(pesos, (v0, v1, v2), (uv3[0], uv3[1], uv3[2]),
                                         mipmaps) / 255.0
 
         n = pesos.T @ normal
         n /= np.maximum(np.linalg.norm(n, axis=1, keepdims=True), 1e-12)
         cor = GL._shade(pesos.T @ pos, n, colors, difusa)
-        cor_rgb8 = np.clip(GL._round(cor * 255), 0, 255).astype(np.uint8)
+        cor_rgb8 = np.clip(piso(cor * 255), 0, 255).astype(np.uint8)
 
         GL._blend_write(ys, xs, sy, sx, cor_rgb8, alpha)
 
@@ -2790,9 +1846,9 @@ class GL:
         Returns
         -------
         None
-            Escreve em GL.ms_buffer; não há retorno.
+            Escreve em estado.ms_buffer; não há retorno.
         """
-        if GL.lights:
+        if estado.lights:
             GL._fill_lit(posicoes, verts, (i0, i1, i2), arestas_l, bboxes, colors,
                          normais, textura)
         else:
@@ -2826,7 +1882,7 @@ class GL:
         Returns
         -------
         None
-            Escreve em GL.ms_buffer; não há retorno.
+            Escreve em estado.ms_buffer; não há retorno.
         """
         alpha = 1.0 - colors["transparency"]
         idx0: list[int] = tri[0].tolist()
@@ -2840,7 +1896,7 @@ class GL:
                                            mipmaps, arestas_l[t], bboxes[t], alpha)
             return
 
-        cor = GL._to_rgb8(colors["emissiveColor"])
+        cor = to_rgb8(colors["emissiveColor"])
         for t, (a, b, c) in enumerate(zip(idx0, idx1, idx2)):
             GL._scan_triangle_depth(verts[a], verts[b], verts[c],
                                     arestas_l[t], bboxes[t], cor, alpha)
@@ -2879,7 +1935,7 @@ class GL:
         Returns
         -------
         None
-            Escreve em GL.ms_buffer; não há retorno.
+            Escreve em estado.ms_buffer; não há retorno.
         """
         alpha = 1.0 - colors["transparency"]
         i0, i1, i2 = tri
@@ -2904,23 +1960,6 @@ class GL:
                                   arestas_l[t], bboxes[t], colors, alpha, tex)
 
     @staticmethod
-    def _optional_mipmaps(current_texture: list[str] | None) -> list[npt.NDArray[np.uint8]] | None:
-        """
-        Devolve os mipmaps da textura atual, ou None se o Appearance não tem textura.
-
-        Parameters
-        ----------
-        current_texture : list[str] or None
-            Caminho(s) da textura atual do Appearance.
-
-        Returns
-        -------
-        list[NDArray[uint8]] or None
-            Cadeia de mipmaps (ver `GL._get_texture_mipmaps`), ou None.
-        """
-        return GL._get_texture_mipmaps(current_texture) if current_texture else None
-
-    @staticmethod
     def _draw_mesh(malha: Malha, colors: Colors, mipmaps: list[npt.NDArray[np.uint8]] | None = None
                    ) -> None:
         """
@@ -2940,12 +1979,12 @@ class GL:
             Cores resolvidas do Appearance/Material do nó.
         mipmaps : list[NDArray[uint8]] or None, optional
             Cadeia de mipmaps da textura da malha (ver
-            `GL._get_texture_mipmaps`), se tiver; os UVs vêm da própria malha.
+            `get_texture_mipmaps`), se tiver; os UVs vêm da própria malha.
 
         Returns
         -------
         None
-            Escreve em GL.ms_buffer; não há retorno.
+            Escreve em estado.ms_buffer; não há retorno.
         """
         posicoes, normais, triangulos, uv = malha
         tela_x, tela_y, tela_w, tela_z = GL._project_points(posicoes.ravel().tolist())
@@ -2985,12 +2024,12 @@ class GL:
         Returns
         -------
         None
-            A função escreve no buffer de multisample da GL (GL.ms_buffer); não há
+            A função escreve no buffer de multisample da GL (estado.ms_buffer); não há
             retorno.
         """
         x, y, z = size
-        malha = GL._cached_mesh(("box", x, y, z), lambda: GL._box_mesh((x, y, z)))
-        GL._draw_mesh(malha, colors, GL._optional_mipmaps(current_texture))
+        malha = cached_mesh(("box", x, y, z), lambda: box_mesh((x, y, z)))
+        GL._draw_mesh(malha, colors, optional_mipmaps(current_texture))
 
     @staticmethod
     def sphere(radius: float, colors: Colors, current_texture: list[str] | None = None) -> None:
@@ -3011,11 +2050,11 @@ class GL:
         Returns
         -------
         None
-            A função escreve no buffer de multisample da GL (GL.ms_buffer); não há
+            A função escreve no buffer de multisample da GL (estado.ms_buffer); não há
             retorno.
         """
-        malha = GL._cached_mesh(("sphere", radius), lambda: GL._sphere_mesh(radius))
-        GL._draw_mesh(malha, colors, GL._optional_mipmaps(current_texture))
+        malha = cached_mesh(("sphere", radius), lambda: sphere_mesh(radius))
+        GL._draw_mesh(malha, colors, optional_mipmaps(current_texture))
 
     @staticmethod
     def cone(bottomRadius: float, height: float, colors: Colors,
@@ -3041,16 +2080,16 @@ class GL:
         Returns
         -------
         None
-            A função escreve no buffer de multisample da GL (GL.ms_buffer); não há
+            A função escreve no buffer de multisample da GL (estado.ms_buffer); não há
             retorno.
         """
         def construir() -> Malha:
-            lateral = GL._side_mesh(0.0, bottomRadius, height, GL._SEGMENTOS, bottomRadius)
-            tampa = GL._cap_mesh(bottomRadius, -height / 2, -1.0, GL._SEGMENTOS, 0)
-            return GL._join_meshes([lateral, tampa])
+            lateral = side_mesh(0.0, bottomRadius, height, SEGMENTOS, bottomRadius)
+            tampa = cap_mesh(bottomRadius, -height / 2, -1.0, SEGMENTOS, 0)
+            return join_meshes([lateral, tampa])
 
-        malha = GL._cached_mesh(("cone", bottomRadius, height), construir)
-        GL._draw_mesh(malha, colors, GL._optional_mipmaps(current_texture))
+        malha = cached_mesh(("cone", bottomRadius, height), construir)
+        GL._draw_mesh(malha, colors, optional_mipmaps(current_texture))
 
     @staticmethod
     def cylinder(radius: float, height: float, colors: Colors,
@@ -3076,17 +2115,17 @@ class GL:
         Returns
         -------
         None
-            A função escreve no buffer de multisample da GL (GL.ms_buffer); não há
+            A função escreve no buffer de multisample da GL (estado.ms_buffer); não há
             retorno.
         """
         def construir() -> Malha:
-            lateral = GL._side_mesh(radius, radius, height, GL._SEGMENTOS, 0.0)
-            topo = GL._cap_mesh(radius, height / 2, 1.0, GL._SEGMENTOS, 0)
-            baixo = GL._cap_mesh(radius, -height / 2, -1.0, GL._SEGMENTOS, 0)
-            return GL._join_meshes([lateral, topo, baixo])
+            lateral = side_mesh(radius, radius, height, SEGMENTOS, 0.0)
+            topo = cap_mesh(radius, height / 2, 1.0, SEGMENTOS, 0)
+            baixo = cap_mesh(radius, -height / 2, -1.0, SEGMENTOS, 0)
+            return join_meshes([lateral, topo, baixo])
 
-        malha = GL._cached_mesh(("cylinder", radius, height), construir)
-        GL._draw_mesh(malha, colors, GL._optional_mipmaps(current_texture))
+        malha = cached_mesh(("cylinder", radius, height), construir)
+        GL._draw_mesh(malha, colors, optional_mipmaps(current_texture))
 
     @staticmethod
     def navigationInfo(headlight: bool) -> None:
@@ -3105,7 +2144,7 @@ class GL:
         Returns
         -------
         None
-            Acrescenta a luz da câmera a GL.lights quando `headlight` é True;
+            Acrescenta a luz da câmera a estado.lights quando `headlight` é True;
             não há retorno.
         """
         # https://www.web3d.org/specifications/X3Dv4/ISO-IEC19775-1v4-IS/Part01/components/navigation.html#NavigationInfo
@@ -3118,8 +2157,8 @@ class GL:
         if headlight:
             # A direção (0, 0, -1) do headlight está no espaço da câmera; a rotação
             # da view é ortogonal, então a inversa dela (camera -> mundo) é a transposta.
-            direcao = GL.view_matrix[:3, :3].T @ np.array([0.0, 0.0, -1.0])
-            GL.lights.append({"direcao": direcao, "cor": np.ones(3),
+            direcao = estado.view_matrix[:3, :3].T @ np.array([0.0, 0.0, -1.0])
+            estado.lights.append({"direcao": direcao, "cor": np.ones(3),
                               "intensidade": 1.0, "ambiente": 0.0})
 
     @staticmethod
@@ -3146,7 +2185,7 @@ class GL:
         Returns
         -------
         None
-            Acrescenta a luz a GL.lights; não há retorno.
+            Acrescenta a luz a estado.lights; não há retorno.
         """
         # https://www.web3d.org/specifications/X3Dv4/ISO-IEC19775-1v4-IS/Part01/components/lighting.html#DirectionalLight
         # Define uma fonte de luz direcional que ilumina ao longo de raios paralelos
@@ -3157,7 +2196,7 @@ class GL:
 
         _, direcao = GL._to_world(np.zeros((1, 3)), np.array([direction], dtype=np.float64))
         assert direcao is not None
-        GL.lights.append({"direcao": direcao[0], "cor": np.asarray(color, dtype=np.float64),
+        estado.lights.append({"direcao": direcao[0], "cor": np.asarray(color, dtype=np.float64),
                           "intensidade": intensity, "ambiente": ambientIntensity})
 
     @staticmethod
@@ -3230,268 +2269,6 @@ class GL:
         print("Fog : color = {0}".format(color)) # imprime no terminal
         print("Fog : visibilityRange = {0}".format(visibilityRange))
 
-    @staticmethod
-    def timeSensor(cycleInterval: float, loop: bool) -> float:
-        """
-        Gera eventos conforme o tempo passa (TimeSensor).
-
-        Parameters
-        ----------
-        cycleInterval : float
-            Duração de um ciclo do TimeSensor, em segundos. Deve ser maior
-            que zero.
-        loop : bool
-            Se True, o TimeSensor continua a execução no próximo ciclo ao
-            final de cada ciclo; se False, a execução é encerrada.
-
-        Returns
-        -------
-        float
-            Fração de tempo decorrida no ciclo atual, em [0, 1) com `loop`.
-            Sem `loop`, cresce até 1.0 ao fim do primeiro ciclo e fica lá.
-            O tempo conta a partir da primeira avaliação de um TimeSensor.
-        """
-        # https://www.web3d.org/specifications/X3Dv4/ISO-IEC19775-1v4-IS/Part01/components/time.html#TimeSensor
-        # Os nós TimeSensor podem ser usados para muitas finalidades, incluindo:
-        # Condução de simulações e animações contínuas; Controlar atividades periódicas;
-        # iniciar eventos de ocorrência única, como um despertador;
-        # Se, no final de um ciclo, o valor do loop for FALSE, a execução é encerrada.
-        # Por outro lado, se o loop for TRUE no final de um ciclo, um nó dependente do
-        # tempo continua a execução no próximo ciclo. O ciclo de um nó TimeSensor dura
-        # cycleInterval segundos. O valor de cycleInterval deve ser maior que zero.
-
-        # Deve retornar a fração de tempo passada em fraction_changed
-        agora = _relogio()
-        if GL._t0 is None:
-            GL._t0 = agora
-
-        decorrido = agora - GL._t0
-        if loop:
-            return (decorrido % cycleInterval) / cycleInterval
-        return min(decorrido / cycleInterval, 1.0)
-
-    @staticmethod
-    def _key_segment(key: list[float], fracao: float) -> tuple[int, float]:
-        """
-        Localiza o intervalo de chaves que contém uma fração.
-
-        Parameters
-        ----------
-        key : list[float]
-            Chaves em ordem crescente, com ao menos duas.
-        fracao : float
-            Fração dentro de `[key[0], key[-1]]`.
-
-        Returns
-        -------
-        int
-            Índice `i` do início do intervalo `[key[i], key[i + 1]]`.
-        float
-            Posição de `fracao` dentro do intervalo, em [0, 1].
-        """
-        chaves = np.asarray(key, dtype=np.float64)
-        i = int(np.clip(np.searchsorted(chaves, fracao, side="right") - 1, 0, len(chaves) - 2))
-        return i, (fracao - chaves[i]) / max(chaves[i + 1] - chaves[i], 1e-12)
-
-    @staticmethod
-    def _spline_derivatives(chaves: npt.NDArray[np.float64], valores: npt.NDArray[np.float64],
-                            fechado: bool) -> npt.NDArray[np.float64]:
-        """
-        Calcula a derivada (Catmull-Rom) do spline em cada chave.
-
-        É a diferença central em relação às chaves vizinhas, que para chaves
-        igualmente espaçadas dá a tangente $(v_{i+1} - v_{i-1}) / 2$ da spec.
-        Num spline aberto os extremos têm derivada nula. Num fechado, os
-        vizinhos dão a volta: o anterior à primeira chave é a penúltima, e o
-        posterior à última é a segunda.
-
-        Parameters
-        ----------
-        chaves : NDArray[float64]
-            Chaves, array (N,).
-        valores : NDArray[float64]
-            Vetores 3D de cada chave, array (N, 3).
-        fechado : bool
-            Se o spline é fechado (primeiro e último valores idênticos).
-
-        Returns
-        -------
-        NDArray[float64]
-            Derivada em relação à chave, array (N, 3).
-        """
-        derivadas = np.zeros_like(valores)
-        if not fechado:
-            derivadas[1:-1] = ((valores[2:] - valores[:-2])
-                               / np.maximum(chaves[2:] - chaves[:-2], 1e-12)[:, None])
-            return derivadas
-
-        mais, menos = np.roll(valores, -1, axis=0), np.roll(valores, 1, axis=0)
-        k_mais, k_menos = np.roll(chaves, -1), np.roll(chaves, 1)
-        menos[0], k_menos[0] = valores[-2], chaves[0] - (chaves[-1] - chaves[-2])
-        mais[-1], k_mais[-1] = valores[1], chaves[-1] + (chaves[1] - chaves[0])
-        return (mais - menos) / np.maximum(k_mais - k_menos, 1e-12)[:, None]
-
-    @staticmethod
-    def splinePositionInterpolator(set_fraction: float, key: list[float], keyValue: list[float],
-                                   closed: bool) -> list[float]:
-        """
-        Interpola não linearmente entre uma lista de vetores 3D.
-
-        Usa a spline cúbica de Hermite com tangentes Catmull-Rom (ver
-        `GL._spline_derivatives`). Fora do intervalo das chaves, mantém o
-        primeiro ou o último valor.
-
-        Parameters
-        ----------
-        set_fraction : float
-            Fração a ser interpolada, em [0, 1].
-        key : list[float]
-            Chaves (quadros-chave) correspondentes a `keyValue`.
-        keyValue : list[float]
-            Vetores 3D a interpolar, no formato [x0, y0, z0, x1, y1, z1, ...] —
-            um vetor por chave em `key`.
-        closed : bool
-            Se True, trata a malha de chaves como fechada, com uma transição
-            da última chave para a primeira (ignorado se os keyValues da
-            primeira e da última chave não forem idênticos).
-
-        Returns
-        -------
-        list[float]
-            Vetor 3D interpolado [x, y, z] para `set_fraction`.
-        """
-        # https://www.web3d.org/specifications/X3Dv4/ISO-IEC19775-1v4-IS/Part01/components/interpolators.html#SplinePositionInterpolator
-        # Interpola não linearmente entre uma lista de vetores 3D. O campo keyValue possui
-        # uma lista com os valores a serem interpolados, key possui uma lista respectiva de chaves
-        # dos valores em keyValue, a fração a ser interpolada vem de set_fraction que varia de
-        # zeroa a um. O campo keyValue deve conter exatamente tantos vetores 3D quanto os
-        # quadros-chave no key. O campo closed especifica se o interpolador deve tratar a malha
-        # como fechada, com uma transições da última chave para a primeira chave. Se os keyValues
-        # na primeira e na última chave não forem idênticos, o campo closed será ignorado.
-        valores = np.asarray(keyValue, dtype=np.float64).reshape(-1, 3)
-        if len(key) == 0 or len(valores) != len(key):
-            return [0.0, 0.0, 0.0]
-        if len(key) == 1 or set_fraction <= key[0]:
-            return valores[0].tolist()
-        if set_fraction >= key[-1]:
-            return valores[-1].tolist()
-
-        chaves = np.asarray(key, dtype=np.float64)
-        fechado = closed and len(key) > 2 and bool(np.allclose(valores[0], valores[-1]))
-        derivadas = GL._spline_derivatives(chaves, valores, fechado)
-
-        i, t = GL._key_segment(key, set_fraction)
-        dt = chaves[i + 1] - chaves[i]
-        h00, h10 = 2 * t**3 - 3 * t**2 + 1, t**3 - 2 * t**2 + t
-        h01, h11 = -2 * t**3 + 3 * t**2, t**3 - t**2
-
-        value_changed = (h00 * valores[i] + h10 * dt * derivadas[i]
-                         + h01 * valores[i + 1] + h11 * dt * derivadas[i + 1])
-        return value_changed.tolist()
-
-    @staticmethod
-    def _slerp(q0: npt.NDArray[np.float64], q1: npt.NDArray[np.float64], t: float
-               ) -> npt.NDArray[np.float64]:
-        """
-        Interpola esfericamente (slerp) entre dois quatérnios unitários, pelo caminho mais curto.
-
-        Parameters
-        ----------
-        q0, q1 : NDArray[float64]
-            Quatérnios unitários [w, x, y, z].
-        t : float
-            Posição entre `q0` (0) e `q1` (1).
-
-        Returns
-        -------
-        NDArray[float64]
-            Quatérnio unitário interpolado. Se os quatérnios são quase
-            paralelos, usa interpolação linear normalizada, que evita a
-            divisão por um seno quase nulo.
-        """
-        cosseno = float(np.dot(q0, q1))
-        if cosseno < 0:  # q e -q são a mesma rotação; escolhe o caminho curto
-            q1, cosseno = -q1, -cosseno
-
-        if cosseno > 0.9995:
-            q = q0 + t * (q1 - q0)
-            return q / np.linalg.norm(q)
-
-        angulo = math.acos(cosseno)
-        return (math.sin((1 - t) * angulo) * q0 + math.sin(t * angulo) * q1) / math.sin(angulo)
-
-    @staticmethod
-    def _quaternion_to_axis_angle(q: npt.NDArray[np.float64]) -> list[float]:
-        """
-        Converte um quatérnio unitário [w, x, y, z] para eixo e ângulo [x, y, z, t].
-
-        Parameters
-        ----------
-        q : NDArray[float64]
-            Quatérnio unitário [w, x, y, z].
-
-        Returns
-        -------
-        list[float]
-            Rotação [x, y, z, t], com t em radianos. Para rotação nula
-            devolve [0, 0, 1, 0].
-        """
-        w = float(np.clip(q[0], -1.0, 1.0))
-        seno_metade = math.sqrt(1.0 - w * w)
-        if seno_metade < 1e-9:
-            return [0.0, 0.0, 1.0, 0.0]
-        eixo = q[1:] / seno_metade
-        return [*eixo.tolist(), 2 * math.acos(w)]
-
-    @staticmethod
-    def orientationInterpolator(set_fraction: float, key: list[float],
-                                keyValue: list[float]) -> list[float]:
-        """
-        Interpola entre uma lista de valores de rotação específicos.
-
-        Converte cada rotação para quatérnio e faz slerp pelo caminho mais
-        curto (ver `GL._slerp`). Fora do intervalo das chaves, mantém a
-        primeira ou a última rotação.
-
-        Parameters
-        ----------
-        set_fraction : float
-            Fração a ser interpolada, em [0, 1].
-        key : list[float]
-            Chaves (quadros-chave) correspondentes a `keyValue`.
-        keyValue : list[float]
-            Rotações a interpolar, no formato [x0, y0, z0, t0, x1, y1, z1, t1,
-            ...] — uma rotação (eixo + ângulo) por chave em `key`.
-
-        Returns
-        -------
-        list[float]
-            Rotação interpolada [x, y, z, t] para `set_fraction`.
-        """
-        # https://www.web3d.org/specifications/X3Dv4/ISO-IEC19775-1v4-IS/Part01/components/interpolators.html#OrientationInterpolator
-        # Interpola rotações são absolutas no espaço do objeto e, portanto, não são cumulativas.
-        # Uma orientação representa a posição final de um objeto após a aplicação de uma rotação.
-        # Um OrientationInterpolator interpola entre duas orientações calculando o caminho mais
-        # curto na esfera unitária entre as duas orientações. A interpolação é linear em
-        # comprimento de arco ao longo deste caminho. Os resultados são indefinidos se as duas
-        # orientações forem diagonalmente opostas. O campo keyValue possui uma lista com os
-        # valores a serem interpolados, key possui uma lista respectiva de chaves
-        # dos valores em keyValue, a fração a ser interpolada vem de set_fraction que varia de
-        # zeroa a um. O campo keyValue deve conter exatamente tantas rotações 3D quanto os
-        # quadros-chave no key.
-        rotacoes = np.asarray(keyValue, dtype=np.float64).reshape(-1, 4)
-        if len(key) == 0 or len(rotacoes) != len(key):
-            return [0.0, 0.0, 1.0, 0.0]
-        if len(key) == 1 or set_fraction <= key[0]:
-            return rotacoes[0].tolist()
-        if set_fraction >= key[-1]:
-            return rotacoes[-1].tolist()
-
-        i, t = GL._key_segment(key, set_fraction)
-        q0 = GL._axis_angle_to_quaternion(rotacoes[i].tolist())
-        q1 = GL._axis_angle_to_quaternion(rotacoes[i + 1].tolist())
-        return GL._quaternion_to_axis_angle(GL._slerp(q0, q1, t))
-
     # Para o futuro (Não para versão atual do projeto.)
     def vertex_shader(self, shader: str) -> None:
         """
@@ -3522,3 +2299,7 @@ class GL:
         None
             Não implementado; não há retorno.
         """
+
+    timeSensor = staticmethod(timeSensor)
+    splinePositionInterpolator = staticmethod(splinePositionInterpolator)
+    orientationInterpolator = staticmethod(orientationInterpolator)

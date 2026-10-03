@@ -5,6 +5,8 @@ Biblioteca gráfica (Graphics Library) do renderizador.
 domínio (matrizes, rasterização, texturas, iluminação, nós X3D, animação).
 """
 
-from ._nucleo import GL, Colors, definir_relogio
+from ._animacao import definir_relogio
+from ._nucleo import GL
+from ._tipos import Colors
 
 __all__ = ["GL", "Colors", "definir_relogio"]
