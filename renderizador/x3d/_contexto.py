@@ -8,7 +8,7 @@ from ._cores import Colors
 from ._preview import Preview
 
 if TYPE_CHECKING:
-    from ._nucleo import Appearance
+    from ._aparencia import Appearance
 
 Renderer = Callable[..., object]
 

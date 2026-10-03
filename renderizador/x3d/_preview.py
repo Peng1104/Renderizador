@@ -5,7 +5,7 @@ Tipos do sistema de pré-visualização das geometrias 2D.
 from typing import TYPE_CHECKING, ClassVar, Protocol, TypedDict
 
 if TYPE_CHECKING:
-    from ._nucleo import Appearance
+    from ._aparencia import Appearance
 
 class Ponto(TypedDict):
     """

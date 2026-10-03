@@ -7,28 +7,23 @@ from typing import TYPE_CHECKING, Callable, Literal, TypeVar, cast, overload
 from ._campos import Element, clean
 
 if TYPE_CHECKING:
+    from ._agrupamento import Transform
+    from ._aparencia import Appearance, ImageTexture, Material, Shape
     from ._nucleo import (
-        Appearance,
         Box,
         Circle2D,
-        Color,
         Cone,
-        Coordinate,
         Cylinder,
-        ImageTexture,
         IndexedFaceSet,
         IndexedTriangleStripSet,
-        Material,
         Polyline2D,
         Polypoint2D,
-        Shape,
         Sphere,
-        TextureCoordinate,
-        Transform,
         TriangleSet,
         TriangleSet2D,
         TriangleStripSet,
     )
+    from ._propriedades import Color, Coordinate, TextureCoordinate
 
 Fabrica = Callable[[Element], object]
 

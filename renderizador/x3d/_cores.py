@@ -5,7 +5,7 @@ Cores resolvidas de um Appearance/Material.
 from typing import TYPE_CHECKING, TypedDict
 
 if TYPE_CHECKING:
-    from ._nucleo import Appearance
+    from ._aparencia import Appearance
 
 class Colors(TypedDict):
     """
