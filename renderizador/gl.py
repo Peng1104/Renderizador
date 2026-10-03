@@ -13,6 +13,7 @@ Data: 19/08/2026
 
 import math  # Funções matemáticas
 import time  # Para operações com tempo
+from collections.abc import Callable
 from typing import ClassVar, TypedDict
 
 import gpu  # Simula os recursos de uma GPU
@@ -26,6 +27,12 @@ import numpy.typing as npt
 # funções de varredura de triângulo dentro do limite de parâmetros por
 # método.
 VerticeProjetado = tuple[float, float, float, float]
+
+# Malha de triângulos indexada, em coordenadas de objeto: (posições (N, 3),
+# normais por vértice (N, 3), triângulos (T, 3) com índices de vértice em
+# ordem anti-horária vista de fora). É o que as primitivas (Box, Sphere,
+# Cone, Cylinder) geram e GL._draw_mesh consome.
+Malha = tuple[npt.NDArray[np.float64], npt.NDArray[np.float64], npt.NDArray[np.int64]]
 
 
 class Colors(TypedDict):
@@ -112,6 +119,15 @@ class GL:
     # retorno) supera a economia de não recalcular por triângulo, medido em
     # bound500.x3d (500 draw calls de 1 triângulo cada, ver GL._prepare_edges_and_bbox).
     _LOTE_MINIMO: ClassVar[int] = 8
+
+    # Resolução da tesselação das primitivas curvas: fatias ao redor do eixo
+    # (esfera, cone, cilindro) e faixas de latitude da esfera.
+    _SEGMENTOS: ClassVar[int] = 48
+    _SPHERE_FAIXAS: ClassVar[int] = 24
+
+    # Cache das malhas das primitivas, por (tipo, parâmetros), para não
+    # retesselar a cada frame (ver GL._cached_mesh).
+    _mesh_cache: ClassVar[dict[tuple[object, ...], Malha]] = {}
 
     @staticmethod
     def setup(width: int, height: int, near: float = 0.01, far: float = 1000) -> None:
@@ -2270,11 +2286,261 @@ class GL:
                                     arestas_l[t], bboxes[t], cor, alpha)
 
     @staticmethod
+    def _circle_xz(segmentos: int) -> tuple[npt.NDArray[np.float64], npt.NDArray[np.float64]]:
+        """
+        Gera os cossenos e senos de uma volta completa, usados nos anéis de cone e cilindro.
+
+        Parameters
+        ----------
+        segmentos : int
+            Quantidade de fatias da volta.
+
+        Returns
+        -------
+        NDArray[float64]
+            Cosseno de cada ângulo, com `segmentos + 1` valores (o último
+            repete o primeiro, para fechar a costura sem reindexar).
+        NDArray[float64]
+            Seno de cada ângulo, mesmo tamanho do retorno anterior.
+        """
+        angulos = np.linspace(0.0, 2 * math.pi, segmentos + 1)
+        return np.cos(angulos), np.sin(angulos)
+
+    @staticmethod
+    def _cap_mesh(raio: float, y: float, normal_y: float, segmentos: int, base: int
+                  ) -> Malha:
+        """
+        Gera uma tampa circular (disco) em triângulos, com normal ao longo de Y.
+
+        Parameters
+        ----------
+        raio : float
+            Raio do disco.
+        y : float
+            Altura do plano do disco, em coordenadas de objeto.
+        normal_y : float
+            Sentido da normal: +1 para tampa voltada para cima, -1 para baixo.
+        segmentos : int
+            Quantidade de fatias do disco.
+        base : int
+            Índice do primeiro vértice da tampa na malha final, somado aos
+            índices dos triângulos para que apontem para os vértices certos.
+
+        Returns
+        -------
+        Malha
+            Posições, normais e triângulos do disco (índices já deslocados
+            por `base`), em ordem anti-horária vista de fora.
+        """
+        c, s = GL._circle_xz(segmentos)
+        anel = np.stack([raio * c, np.full_like(c, y), raio * s], axis=1)
+        posicoes = np.vstack([[0.0, y, 0.0], anel])
+        normais = np.tile([0.0, normal_y, 0.0], (len(posicoes), 1))
+
+        j = np.arange(segmentos)
+        centro = np.zeros(segmentos, dtype=np.int64)
+        atual, proximo = j + 1, j + 2
+        # Vista de cima, φ crescente é horário; a tampa de baixo inverte a ordem.
+        pares = (proximo, atual) if normal_y > 0 else (atual, proximo)
+        triangulos = np.stack([centro, pares[0], pares[1]], axis=1) + base
+        return posicoes, normais, triangulos
+
+    @staticmethod
+    def _join_meshes(malhas: list[Malha]) -> Malha:
+        """
+        Concatena várias malhas numa só, reindexando os triângulos.
+
+        Parameters
+        ----------
+        malhas : list[Malha]
+            Malhas cujos triângulos indexam apenas os próprios vértices.
+
+        Returns
+        -------
+        Malha
+            Malha única com os vértices, normais e triângulos de todas.
+        """
+        deslocamento = np.cumsum([0] + [len(m[0]) for m in malhas[:-1]])
+        posicoes = np.vstack([m[0] for m in malhas])
+        normais = np.vstack([m[1] for m in malhas])
+        triangulos = np.vstack([m[2] + d for m, d in zip(malhas, deslocamento)])
+        return posicoes, normais, triangulos
+
+    @staticmethod
+    def _side_mesh(raio_topo: float, raio_base: float, altura: float, segmentos: int,
+                   normal_y: float) -> Malha:
+        """
+        Gera a superfície lateral de um cone ou cilindro (anel de cima e anel de baixo).
+
+        Os vértices são duplicados em cada fatia (e a costura repetida), para
+        que cada fatia tenha a própria normal e a lateral fique suave.
+
+        Parameters
+        ----------
+        raio_topo : float
+            Raio do anel de cima (0 para um cone, com o vértice no topo).
+        raio_base : float
+            Raio do anel de baixo.
+        altura : float
+            Altura total; o sólido fica centrado na origem em Y.
+        segmentos : int
+            Quantidade de fatias.
+        normal_y : float
+            Componente Y (antes de normalizar) da normal lateral: 0 para
+            cilindro e `raio_base` para cone, junto com o componente
+            horizontal `altura`.
+
+        Returns
+        -------
+        Malha
+            Posições, normais e triângulos da lateral, em ordem anti-horária
+            vista de fora.
+        """
+        c, s = GL._circle_xz(segmentos)
+        topo = np.stack([raio_topo * c, np.full_like(c, altura / 2), raio_topo * s], axis=1)
+        base = np.stack([raio_base * c, np.full_like(c, -altura / 2), raio_base * s], axis=1)
+        horizontal = altura if normal_y else 1.0
+        n = np.stack([horizontal * c, np.full_like(c, normal_y), horizontal * s], axis=1)
+        n /= np.linalg.norm(n, axis=1, keepdims=True)
+
+        j = np.arange(segmentos)
+        t, t1 = j, j + 1
+        b, b1 = j + segmentos + 1, j + segmentos + 2
+        triangulos = np.vstack([np.stack([b1, b, t], axis=1), np.stack([b1, t, t1], axis=1)])
+        if raio_topo == 0:  # cone: o segundo triângulo do quad degenera no vértice
+            triangulos = triangulos[:segmentos]
+        return np.vstack([topo, base]), np.vstack([n, n]), triangulos
+
+    @staticmethod
+    def _box_mesh(tamanho: tuple[float, float, float]) -> Malha:
+        """
+        Gera a malha de um Box centrado na origem, com 4 vértices por face.
+
+        Parameters
+        ----------
+        tamanho : tuple[float, float, float]
+            Extensões da caixa ao longo de X, Y e Z.
+
+        Returns
+        -------
+        Malha
+            24 vértices (normais planas por face) e 12 triângulos.
+        """
+        meio = np.asarray(tamanho, dtype=np.float64) / 2
+        # Cada face: normal e 4 cantos em ordem anti-horária vista de fora.
+        faces = [
+            ((0, 0, 1), [(-1, -1, 1), (1, -1, 1), (1, 1, 1), (-1, 1, 1)]),
+            ((0, 0, -1), [(1, -1, -1), (-1, -1, -1), (-1, 1, -1), (1, 1, -1)]),
+            ((1, 0, 0), [(1, -1, 1), (1, -1, -1), (1, 1, -1), (1, 1, 1)]),
+            ((-1, 0, 0), [(-1, -1, -1), (-1, -1, 1), (-1, 1, 1), (-1, 1, -1)]),
+            ((0, 1, 0), [(-1, 1, 1), (1, 1, 1), (1, 1, -1), (-1, 1, -1)]),
+            ((0, -1, 0), [(-1, -1, -1), (1, -1, -1), (1, -1, 1), (-1, -1, 1)]),
+        ]
+        posicoes = np.array([c for _, cantos in faces for c in cantos], dtype=np.float64) * meio
+        normais = np.array([n for n, _ in faces for _ in range(4)], dtype=np.float64)
+        quad = np.array([[0, 1, 2], [0, 2, 3]])
+        triangulos = np.vstack([quad + 4 * f for f in range(len(faces))])
+        return posicoes, normais, triangulos
+
+    @staticmethod
+    def _sphere_mesh(raio: float) -> Malha:
+        """
+        Gera a malha de uma Sphere centrada na origem (latitude por longitude).
+
+        Parameters
+        ----------
+        raio : float
+            Raio da esfera.
+
+        Returns
+        -------
+        Malha
+            Vértices, normais (direção radial) e triângulos; nos polos os
+            triângulos degenerados têm área zero e são descartados pelo culling.
+        """
+        faixas, fatias = GL._SPHERE_FAIXAS, GL._SEGMENTOS
+        theta = np.linspace(0.0, math.pi, faixas + 1)[:, None]
+        phi = np.linspace(0.0, 2 * math.pi, fatias + 1)[None, :]
+        normais = np.stack([np.sin(theta) * np.cos(phi),
+                            np.cos(theta) * np.ones_like(phi),
+                            np.sin(theta) * np.sin(phi)], axis=-1).reshape(-1, 3)
+
+        i, j = np.meshgrid(np.arange(faixas), np.arange(fatias), indexing="ij")
+        a = (i * (fatias + 1) + j).ravel()
+        b, c, d = a + 1, a + fatias + 1, a + fatias + 2
+        triangulos = np.vstack([np.stack([d, c, a], axis=1), np.stack([d, a, b], axis=1)])
+        return normais * raio, normais, triangulos
+
+    @staticmethod
+    def _cached_mesh(chave: tuple[object, ...], construir: Callable[[], Malha]) -> Malha:
+        """
+        Devolve a malha de uma primitiva, construindo-a só na primeira vez.
+
+        Parameters
+        ----------
+        chave : tuple[object, ...]
+            Identifica a primitiva e seus parâmetros (por exemplo, `("box", x, y, z)`).
+        construir : Callable[[], Malha]
+            Função sem argumentos que gera a malha quando não está em cache.
+
+        Returns
+        -------
+        Malha
+            Malha da primitiva, compartilhada entre frames.
+        """
+        if chave not in GL._mesh_cache:
+            GL._mesh_cache[chave] = construir()
+        return GL._mesh_cache[chave]
+
+    @staticmethod
+    def _draw_mesh(malha: Malha, colors: Colors) -> None:
+        """
+        Projeta, descarta faces de costas e rasteriza uma malha de triângulos indexada.
+
+        Caminho comum das primitivas (Box, Sphere, Cone e Cylinder): elas só
+        geram a malha, e o resto do pipeline é o mesmo de `GL.triangleSet`.
+        Preenche com `colors["emissiveColor"]`.
+
+        Parameters
+        ----------
+        malha : Malha
+            Posições (em coordenadas de objeto), normais e triângulos.
+        colors : Colors
+            Cores resolvidas do Appearance/Material do nó.
+
+        Returns
+        -------
+        None
+            Escreve em GL.ms_buffer; não há retorno.
+        """
+        posicoes, _normais, triangulos = malha
+        tela_x, tela_y, tela_w, tela_z = GL._project_points(posicoes.ravel().tolist())
+
+        i0, i1, i2 = triangulos[:, 0], triangulos[:, 1], triangulos[:, 2]
+        frente = GL._front_facing_mask(tela_x, tela_y, i0, i1, i2)
+        i0, i1, i2 = i0[frente], i1[frente], i2[frente]
+
+        if i0.size == 0:
+            return
+
+        verts: list[VerticeProjetado] = list(
+            zip(tela_x.tolist(), tela_y.tolist(), tela_w.tolist(), tela_z.tolist()))
+        arestas_l, bboxes = GL._prepare_edges_and_bbox(tela_x, tela_y, i0, i1, i2)
+        cor = GL._to_rgb8(colors["emissiveColor"])
+        alpha = 1.0 - colors["transparency"]
+
+        idx0: list[int] = i0.tolist()
+        idx1: list[int] = i1.tolist()
+        idx2: list[int] = i2.tolist()
+
+        for t, (a, b, c) in enumerate(zip(idx0, idx1, idx2)):
+            GL._scan_triangle_depth(verts[a], verts[b], verts[c],
+                                    arestas_l[t], bboxes[t], cor, alpha)
+
+    @staticmethod
     def box(size: list[float], colors: Colors) -> None:
         """
         Renderiza Box: um paralelepípedo centrado na origem local.
-
-        Ainda não implementado (stub) — ver comentário abaixo.
 
         Parameters
         ----------
@@ -2287,30 +2553,17 @@ class GL:
         Returns
         -------
         None
-            A função desenharia diretamente no framebuffer da GL; não há
+            A função escreve no buffer de multisample da GL (GL.ms_buffer); não há
             retorno.
         """
-        # https://www.web3d.org/specifications/X3Dv4/ISO-IEC19775-1v4-IS/Part01/components/geometry3D.html#Box
-        # A função box é usada para desenhar paralelepípedos na cena. O Box é centrada no
-        # (0, 0, 0) no sistema de coordenadas local e alinhado com os eixos de coordenadas
-        # locais. O argumento size especifica as extensões da caixa ao longo dos eixos X, Y
-        # e Z, respectivamente, e cada valor do tamanho deve ser maior que zero. Para desenha
-        # essa caixa você vai provavelmente querer tesselar ela em triângulos, para isso
-        # encontre os vértices e defina os triângulos.
-
-        # O print abaixo é só para vocês verificarem o funcionamento, DEVE SER REMOVIDO.
-        print("Box : size = {0}".format(size)) # imprime no terminal pontos
-        print("Box : colors = {0}".format(colors)) # imprime no terminal as cores
-
-        # Exemplo de desenho de um pixel branco na coordenada 10, 10
-        gpu.GPU.draw_pixel([10, 10], gpu.PixelFormat.RGB8, [255, 255, 255])  # altera pixel
+        x, y, z = size
+        malha = GL._cached_mesh(("box", x, y, z), lambda: GL._box_mesh((x, y, z)))
+        GL._draw_mesh(malha, colors)
 
     @staticmethod
     def sphere(radius: float, colors: Colors) -> None:
         """
         Renderiza Sphere: uma esfera centrada na origem local.
-
-        Ainda não implementado (stub) — ver comentário abaixo.
 
         Parameters
         ----------
@@ -2322,26 +2575,18 @@ class GL:
         Returns
         -------
         None
-            A função desenharia diretamente no framebuffer da GL; não há
+            A função escreve no buffer de multisample da GL (GL.ms_buffer); não há
             retorno.
         """
-        # https://www.web3d.org/specifications/X3Dv4/ISO-IEC19775-1v4-IS/Part01/components/geometry3D.html#Sphere
-        # A função sphere é usada para desenhar esferas na cena. O esfera é centrada no
-        # (0, 0, 0) no sistema de coordenadas local. O argumento radius especifica o
-        # raio da esfera que está sendo criada. Para desenha essa esfera você vai
-        # precisar tesselar ela em triângulos, para isso encontre os vértices e defina
-        # os triângulos.
-
-        # O print abaixo é só para vocês verificarem o funcionamento, DEVE SER REMOVIDO.
-        print("Sphere : radius = {0}".format(radius)) # imprime no terminal o raio da esfera
-        print("Sphere : colors = {0}".format(colors)) # imprime no terminal as cores
+        malha = GL._cached_mesh(("sphere", radius), lambda: GL._sphere_mesh(radius))
+        GL._draw_mesh(malha, colors)
 
     @staticmethod
     def cone(bottomRadius: float, height: float, colors: Colors) -> None:
         """
         Renderiza Cone: um cone centrado na origem local, alinhado ao eixo Y.
 
-        Ainda não implementado (stub) — ver comentário abaixo.
+        O vértice fica em +height/2 e a base (fechada) em -height/2.
 
         Parameters
         ----------
@@ -2355,28 +2600,23 @@ class GL:
         Returns
         -------
         None
-            A função desenharia diretamente no framebuffer da GL; não há
+            A função escreve no buffer de multisample da GL (GL.ms_buffer); não há
             retorno.
         """
-        # https://www.web3d.org/specifications/X3Dv4/ISO-IEC19775-1v4-IS/Part01/components/geometry3D.html#Cone
-        # A função cone é usada para desenhar cones na cena. O cone é centrado no
-        # (0, 0, 0) no sistema de coordenadas local. O argumento bottomRadius especifica o
-        # raio da base do cone e o argumento height especifica a altura do cone.
-        # O cone é alinhado com o eixo Y local. O cone é fechado por padrão na base.
-        # Para desenha esse cone você vai precisar tesselar ele em triângulos, para isso
-        # encontre os vértices e defina os triângulos.
+        def construir() -> Malha:
+            lateral = GL._side_mesh(0.0, bottomRadius, height, GL._SEGMENTOS, bottomRadius)
+            tampa = GL._cap_mesh(bottomRadius, -height / 2, -1.0, GL._SEGMENTOS, 0)
+            return GL._join_meshes([lateral, tampa])
 
-        # O print abaixo é só para vocês verificarem o funcionamento, DEVE SER REMOVIDO.
-        print("Cone : bottomRadius = {0}".format(bottomRadius)) # imprime no terminal o raio da base
-        print("Cone : height = {0}".format(height)) # imprime no terminal a altura do cone
-        print("Cone : colors = {0}".format(colors)) # imprime no terminal as cores
+        malha = GL._cached_mesh(("cone", bottomRadius, height), construir)
+        GL._draw_mesh(malha, colors)
 
     @staticmethod
     def cylinder(radius: float, height: float, colors: Colors) -> None:
         """
         Renderiza Cylinder: um cilindro centrado na origem local, alinhado ao eixo Y.
 
-        Ainda não implementado (stub) — ver comentário abaixo.
+        Fechado nas duas extremidades.
 
         Parameters
         ----------
@@ -2390,22 +2630,17 @@ class GL:
         Returns
         -------
         None
-            A função desenharia diretamente no framebuffer da GL; não há
+            A função escreve no buffer de multisample da GL (GL.ms_buffer); não há
             retorno.
         """
-        # https://www.web3d.org/specifications/X3Dv4/ISO-IEC19775-1v4-IS/Part01/components/geometry3D.html#Cylinder
-        # A função cylinder é usada para desenhar cilindros na cena. O cilindro é centrado no
-        # (0, 0, 0) no sistema de coordenadas local. O argumento radius especifica o
-        # raio da base do cilindro e o argumento height especifica a altura do cilindro.
-        # O cilindro é alinhado com o eixo Y local. O cilindro é fechado por padrão em
-        # ambas as extremidades.
-        # Para desenha esse cilindro você vai precisar tesselar ele em triângulos, para isso
-        # encontre os vértices e defina os triângulos.
+        def construir() -> Malha:
+            lateral = GL._side_mesh(radius, radius, height, GL._SEGMENTOS, 0.0)
+            topo = GL._cap_mesh(radius, height / 2, 1.0, GL._SEGMENTOS, 0)
+            baixo = GL._cap_mesh(radius, -height / 2, -1.0, GL._SEGMENTOS, 0)
+            return GL._join_meshes([lateral, topo, baixo])
 
-        # O print abaixo é só para vocês verificarem o funcionamento, DEVE SER REMOVIDO.
-        print("Cylinder : radius = {0}".format(radius)) # imprime no terminal o raio do cilindro
-        print("Cylinder : height = {0}".format(height)) # imprime no terminal a altura do cilindro
-        print("Cylinder : colors = {0}".format(colors)) # imprime no terminal as cores
+        malha = GL._cached_mesh(("cylinder", radius, height), construir)
+        GL._draw_mesh(malha, colors)
 
     @staticmethod
     def navigationInfo(headlight: bool) -> None:
